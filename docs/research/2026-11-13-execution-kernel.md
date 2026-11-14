@@ -28,8 +28,9 @@ LiteLLM 虚拟 key、bwrap/nsjail 在容器内可用性。
    容器内非特权场景的失败点通常在**随后的 mount**（"No permissions to create new namespace"
    或 mount 被拒），而 Docker 默认 seccomp 直接拦 `clone`/`unshare`。
 5. 因此沙箱探测不能只看 `returncode`/`shutil.which`，必须做**隔离断言**（uid_map、能否看到宿主根）。
-6. 本项目在 2、3 两项的主体实现已与主流一致（epoch fencing、重试上限、`/key/generate` + `/spend/logs`），
-   主要缺口是**外部副作用幂等键**、**key 吊销/预算上限**、**沙箱能力探测**，见 §5。
+6. 本项目在 2、3 两项的主体实现已与主流一致（epoch fencing、重试上限、`/key/generate` +
+   `/key/delete` + `max_budget` + `/spend/logs`），主要缺口是**外部副作用幂等键**、
+   **沙箱能力探测**、**真实网关验证**，见 §5。
 
 ---
 
@@ -149,11 +150,17 @@ LiteLLM 虚拟 key、bwrap/nsjail 在容器内可用性。
   `GET /spend/logs` + `normalize_spend` + 按 `gateway_request_id` 去重
   （`/Library/git-root/dsh-platform/src/ao/gateway.py:118`、`:155`），并有 `mock` 实现
   （`/Library/git-root/dsh-platform/src/ao/gateway.py:55`）。
-- 缺口：
-  1. **没有吊销**。run 结束或工作流删除后 key 仍有效，等于凭据长期存活。
-  2. **没有预算上限**。签发时不传 `max_budget` / `budget_duration`，超支只能靠事后对账。
-  3. **未处理多副本一致性**，也没在部署说明里要求共享 Redis。
-  4. **被拒请求不计费的语义没落到对账逻辑**：我们按 `spend/logs` 求和，天然不含被拒请求，
+- 已实现（初稿曾误判为缺口，核对 `gateway.py` 后更正）：
+  1. **吊销**：`revoke_key` 走 `POST /key/delete`，失败只告警不阻塞收尾
+     （`/Library/git-root/dsh-platform/src/ao/gateway.py:112`）。
+  2. **单 key 预算**：签发时传 `max_budget` 与 `duration`，402 映射为 `BudgetExceeded`
+     （`/Library/git-root/dsh-platform/src/ao/gateway.py:99`、`:104`）。
+- 真实缺口：
+  1. **未对真实网关验证字段**：`/key/generate` 响应用 `key_name`/`token` 兜底取 `key_id`，
+     `/spend/logs` 用 `spend`/`prompt_tokens`/`startTime` 取值（`:109`、`:137`），
+     这些都是按文档推测的，接真实实例需要核对一次。
+  2. **未要求多副本共享 Redis**，吊销与限流在副本间可能不一致。
+  3. **被拒请求不计费的语义没落到对账逻辑**：我们按 `spend/logs` 求和，天然不含被拒请求，
      这在"平台侧限制 = 网关侧限制"的前提下才成立，需要文档层面写清楚。
 - 这些是 P1-T12 从 🟡 转 ✅ 之前必须补的，不算 P1-T01 的代码改动。
 
@@ -203,6 +210,33 @@ LiteLLM 虚拟 key、bwrap/nsjail 在容器内可用性。
   一旦上 Linux 容器，很可能在第一次 mount 时才炸。
 - fail closed 的策略是对的（`AO_SANDBOX=none` 仅 `AO_ENV=dev`），与业内"宁可拒绝不可降级"一致。
 
+### 容器内实测（Docker 28.5.2 / OrbStack，2026-11-14）
+
+镜像 `docker.m.daocloud.io/library/python:3.12-slim` + apt 安装 `bubblewrap 0.12.0`，
+命令统一为 `bwrap --unshare-all --ro-bind / / --tmpfs /tmp [--proc /proc --dev /dev]
+/bin/sh -c 'id -u; cat /proc/self/uid_map'`：
+
+| 容器配置 | 结果 | 输出 |
+|---|---|---|
+| 默认（builtin seccomp、无额外 cap） | 失败 | `bwrap: No permissions to create a new namespace, ...`（rc=1） |
+| `--security-opt seccomp=unconfined`，保留 `--proc` | 失败 | `bwrap: Can't mount proc on /proc: Operation not permitted`（rc=1） |
+| `--cap-add SYS_ADMIN`，保留 `--proc` | 失败 | `bwrap: pivot_root: Operation not permitted`（rc=1） |
+| `--security-opt seccomp=unconfined`，去掉 `--proc`/`--dev` | 成功 | uid=0，uid_map=`0 0 1`（rc=0） |
+| `--privileged`，保留 `--proc`/`--dev` | 成功 | uid=0，uid_map=`0 0 1`（rc=0） |
+
+三点结论：
+
+1. §4 事实 2 的推断被证实：**失败点在 mount**。默认 seccomp 下先死在 namespace 创建，
+   放开 seccomp 后前移到 `mount proc`，再加 `CAP_SYS_ADMIN` 又前移到 `pivot_root`。
+   同一份 argv 在不同容器配置下报三种错，说明**stderr 首行就是最有效的归因依据**。
+2. 只加 `--cap-add SYS_ADMIN` **不够**（`pivot_root` 仍被拒），"加 SYS_ADMIN 就能跑"的说法在这套
+   运行时不成立；实测能跑通的非特权配置是"放开 seccomp + 不挂 `--proc`/`--dev`"。
+3. 成功时 uid_map 是 `0 0 1`（非 identity），`probe()` 的判定与真实形态一致；而"没建 userns
+   却能跑"的 identity 场景在本机构造不出来，该分支目前只有单测覆盖。
+
+对 `build_bwrap` 的直接提示：它固定挂载 `--proc /proc` 与 `--dev /dev`，在非特权云容器里
+很可能正好死在这两个 flag 上，需要评估 harness 是否真的依赖 `/proc`。
+
 ---
 
 ## 5. 差异与待办（按优先级）
@@ -212,11 +246,12 @@ LiteLLM 虚拟 key、bwrap/nsjail 在容器内可用性。
 | 1 | 沙箱只查二进制存在，不探测 namespace/mount 能力 | P1-T13 在 Linux 容器里可能首次 mount 才失败，且失败点难以归因 | `sandbox.py` 增加 `probe()`：在 `--unshare-all` 下跑 `id -u` 与 `cat /proc/self/uid_map`，断言映射为 0；再断言读不到宿主 `/` 的非挂载目录 |
 | 2 | `build_bwrap` 注释把 `--unshare-all` 描述为强制隔离 | 误导后续实现（尤其 authoring profile 的"不得跨 session"） | 改注释，并按需显式写 `--unshare-user`（要强隔离就别用 `-try`） |
 | 3 | 外部副作用没有幂等键 | 节点重跑（LangGraph 语义 + 接管重跑）会重复发消息/写外部系统 | action 类节点的 key 由 `run_id + node_id` 派生，不用 attempt |
-| 4 | 网关 key 不吊销、无预算上限、无多副本 Redis 要求 | 凭据长期有效、超支只能事后发现 | `gateway.py` 补 `/key/delete`；签发传 `max_budget`/`budget_duration`；部署文档写明 Redis |
+| 4 | 网关未对真实实例验证；未要求多副本共享 Redis | 字段推测错误会导致记账静默为零；副本间吊销不一致 | 起一个 LiteLLM Proxy 核对 `/key/generate` 与 `/spend/logs` 响应；部署文档写明 Redis |
 | 5 | `durability` 未显式配置，崩溃注入未做 | 无法断言"节点边界不重复"在 PG saver 上成立 | P1-T13 的 Linux 环境里做一次 kill -9 注入 |
 | 6 | 无部分索引 | 当前量级无影响 | 表增长后再评估，不提前优化 |
+| 7 | `build_bwrap` 固定挂 `--proc`/`--dev` | 实测中非特权容器正是死在这两个 flag 上 | 评估 harness 是否依赖 `/proc`；不需要就按 profile 省略 |
 
-以上 1、2、5 属于 P1-T13 的前置；3、4 属于 P1-T12 转 ✅ 的前置；6 不做。
+以上 1、2、5、7 属于 P1-T13 的前置；3、4 属于 P1-T12 转 ✅ 的前置；6 不做。
 
 已完成（2026-11-14）：
 
@@ -225,13 +260,16 @@ LiteLLM 虚拟 key、bwrap/nsjail 在容器内可用性。
   `executor` 真跑路径改调 `require_available()`（二进制 + 隔离双检），失败即 fail closed。
 - 第 2 项：`build_bwrap` 注释已按 bwrap(1) 手册修正，明确 `--unshare-all` 的 user/cgroup 是 `-try`。
 - 第 5 项：仍需 Linux 环境做 kill -9 崩溃注入，本机无法完成。
+- 第 7 项：`SandboxSpec` 新增 `mount_proc` / `mount_dev`（`AO_SANDBOX_MOUNT_PROC`、`AO_SANDBOX_MOUNT_DEV`，
+  默认 1 = 保持原行为），`build_bwrap` 按开关决定是否挂载；`probe()` 固定挂 `/proc` 以便读 `uid_map`，
+  与运行时开关无关。是否该长期关闭仍需在目标容器里实测 harness 对 `/proc` 的依赖后才能定。
 
 ---
 
 ## 6. 局限
 
-- 未实测：bwrap/nsjail 在本项目目标云容器（无特权、seccomp 默认开启）里的行为，只依据 issue 与手册推断；
-  结论的"失败点通常在 mount"需要在 P1-T13 实跑时验证并回写本文档。
+- bwrap 已在本地 OrbStack 容器实测（见 §4 表），但**目标云容器仍未验证**；nsjail 完全未实测，
+  只依据 README 与 issue 描述。
 - 未覆盖 LangGraph `durability` 三档（`exit` / `async` / `sync`）的性能与语义差异，只确认了恢复粒度。
 - LiteLLM 的 `/spend/logs` 返回结构随版本变动，`normalize_spend` 目前按 `spend`/`model`/`request_id` 取值，
   接真实网关时需要按实际响应核对一次。

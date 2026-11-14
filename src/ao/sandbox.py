@@ -27,6 +27,10 @@ class SandboxSpec:
     capability: str
     writable: list[Path]
     readonly: list[Path]
+    #: 是否在沙箱内挂 /proc 与 /dev。实测（研究文档 §4）非特权容器最先死在这两个挂载点上，
+    #: 受限环境可关掉；关闭后 harness 若依赖 /proc 需自行承担
+    mount_proc: bool = True
+    mount_dev: bool = True
 
 
 #: 能力包 → 可写目录；`full_access` 平台侧不开放
@@ -48,6 +52,8 @@ def resolve(capability: str, package_root: Path) -> SandboxSpec:
         capability=capability,
         writable=writable,
         readonly=[package_root / "prompts", package_root / "contracts"],
+        mount_proc=settings.sandbox_mount_proc,
+        mount_dev=settings.sandbox_mount_dev,
     )
 
 
@@ -112,7 +118,15 @@ def probe(
         return _remember(mode, False, str(exc), use_cache)
 
     workdir = Path(tempfile.mkdtemp(prefix="ao-sandbox-probe-"))
-    spec = SandboxSpec(mode=mode, capability="read_only", writable=[workdir], readonly=[])
+    # 探测固定挂 /proc：要读 uid_map 才能断言 userns，与运行时是否挂载无关
+    spec = SandboxSpec(
+        mode=mode,
+        capability="read_only",
+        writable=[workdir],
+        readonly=[],
+        mount_proc=True,
+        mount_dev=True,
+    )
     argv = launch_argv(spec, ["/bin/sh", "-c", "cat /proc/self/uid_map"])
     try:
         completed = subprocess.run(
@@ -168,18 +182,12 @@ def build_bwrap(spec: SandboxSpec, command: list[str]) -> list[str]:
     user namespace 建不起来时会**静默跳过**，失败点后移到 mount（非 root 无 CAP_SYS_ADMIN）。
     需要强隔离时应显式写 `--unshare-user` 让它在不可用时直接失败，这一点由 `probe()` 负责断言。
     """
-    args = [
-        "bwrap",
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-all",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-    ]
+    args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-all"]
+    if spec.mount_proc:
+        args += ["--proc", "/proc"]
+    if spec.mount_dev:
+        args += ["--dev", "/dev"]
+    args += ["--tmpfs", "/tmp"]
     for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/alternatives"):
         if Path(path).exists():
             args += ["--ro-bind", path, path]

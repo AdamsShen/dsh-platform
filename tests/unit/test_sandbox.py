@@ -38,6 +38,23 @@ def test_bwrap_command_isolates(tmp_path: Path) -> None:
     assert argv[-2:] == ["python", "graph.py"]
 
 
+def test_bwrap_can_skip_proc_and_dev(tmp_path: Path) -> None:
+    # 非特权容器里 /proc、/dev 是最常见的失败点，允许按环境关掉
+    spec = sandbox.resolve("workspace_write", tmp_path)
+    spec.mount_proc = False
+    spec.mount_dev = False
+    argv = sandbox.build_bwrap(spec, ["python", "graph.py"])
+    assert "--proc" not in argv
+    assert "--dev" not in argv
+    assert "--unshare-all" in argv
+
+
+def test_bwrap_mounts_proc_by_default(tmp_path: Path) -> None:
+    spec = sandbox.resolve("workspace_write", tmp_path)
+    argv = sandbox.build_bwrap(spec, ["python", "graph.py"])
+    assert "--proc" in argv and "--dev" in argv
+
+
 def test_full_access_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(SandboxUnavailable, match="danger-full-access"):
         sandbox.resolve("full_access", tmp_path)

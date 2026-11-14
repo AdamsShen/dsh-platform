@@ -17,8 +17,8 @@
 | P1-T09 停止 | ✅ | 节点边界取消；queued 立即取消 |
 | P1-T10 接管与 fencing | ✅ | epoch 校验 + 同机 resume + 过期回收 |
 | P1-T11 变量解析 | ✅ | `vars.py`，run 级预取 + 节点懒解析 + `run_vars` 缓存；agent 兜底按设计 §19.1 未启用 |
-| P1-T12 网关与记账 | 🟡 | 虚拟 key/spend log 适配器 + 去重；未连真实 LiteLLM 验证。**真跑时 `spent_usd=0`，因为本机没有网关，账单不可用**。转 ✅ 前需补：`/key/delete` 吊销、签发带 `max_budget`/`budget_duration`、部署要求共享 Redis（复核见研究文档 §5） |
-| P1-T13~T17 沙箱 | 🟡 | 参数构造、输入中和、能力包、fail closed 已实现；bwrap 未在 Linux 实跑。2026-11-14 补 `sandbox.probe()`：实际起一次最小 bwrap 读 `uid_map` 断言 user namespace 真的生效（identity 映射判失败），带 60s 缓存；`executor` 真跑路径改为 `require_available()`（二进制 + 隔离双检），并按 bwrap(1) 修正 `--unshare-all` 的注释（user/cgroup 是 `-try`，不是强制）。单测 6 条，全量 110 passed |
+| P1-T12 网关与记账 | 🟡 | 虚拟 key/spend log 适配器 + 去重 + 吊销 + 单 key 预算；未连真实 LiteLLM 验证。**真跑时 `spent_usd=0`，因为本机没有网关，账单不可用**。转 ✅ 前需补：真实网关验证（`/key/generate` 响应字段、`/spend/logs` 结构）、部署要求共享 Redis（多副本吊销/限流）、"被拒请求不写 SpendLogs"的对账语义说明 |
+| P1-T13~T17 沙箱 | 🟡 | 参数构造、输入中和、能力包、fail closed 已实现；bwrap 未在 Linux 实跑。2026-11-14 补 `sandbox.probe()`：实际起一次最小 bwrap 读 `uid_map` 断言 user namespace 真的生效（identity 映射判失败），带 60s 缓存；`executor` 真跑路径改为 `require_available()`（二进制 + 隔离双检），并按 bwrap(1) 修正 `--unshare-all` 的注释（user/cgroup 是 `-try`，不是强制）。单测 6 条，全量 110 passed。**2026-11-14 容器内实测**（Docker/OrbStack + bwrap 0.12.0）：默认 seccomp 报 `No permissions to create a new namespace`；放开 seccomp 后前移到 `Can't mount proc on /proc`；加 `CAP_SYS_ADMIN` 又前移到 `pivot_root`；只有 `--privileged` 或"放开 seccomp + 去掉 `--proc`/`--dev`"能跑通（uid_map `0 0 1`）。说明现有 `build_bwrap` 的 `--proc`/`--dev` 在非特权容器就是失败点，目标云容器仍需实跑。已把这两个挂载做成 `AO_SANDBOX_MOUNT_PROC` / `AO_SANDBOX_MOUNT_DEV`（默认 1，保持原行为），`SandboxSpec` 增加对应字段；沙箱单测 8 条，全量 112 passed |
 | P1-T18 验收演练 | ✅ | `scripts/drill.py`：正常/契约失败/取数失败/停止/接管/预算六个场景 6/6（mock，确定性）；真实 provider 已在 T02 覆盖 |
 
 ## P2 工作流生成
