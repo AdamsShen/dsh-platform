@@ -20,7 +20,7 @@ def clean_runs() -> None:
         # fire_due 的结果里）。这里一并截断，测试之间不共享调度状态。
         conn.execute(
             "TRUNCATE runs, run_nodes, run_steps, run_vars, run_events, run_effects, llm_usage,"
-            " planner_messages, planner_sessions, trigger_events, triggers CASCADE"
+            " gateway_keys, planner_messages, planner_sessions, trigger_events, triggers CASCADE"
         )
     yield
 

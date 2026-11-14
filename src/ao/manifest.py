@@ -41,7 +41,8 @@ class Node(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
-    kind: Literal["agent", "action"] = "agent"
+    # action 节点已移除，所有节点都是一次 harness turn；字段只为兼容历史包保留
+    kind: str = "agent"
     title: str | None = None
     #: 包内相对路径；内容由 wf_sdk 按节点 id 读取，代码里不内联提示词
     system: str | None = None

@@ -21,6 +21,7 @@ from psycopg.types.json import Jsonb
 from ao import contracts, events, resources, usage
 from ao import state as state_machine
 from ao.db import fetch_one, read, tx
+from ao.gateway import gateway_root
 from ao.harness.base import Provider, Reply
 from ao.harness.mock import MockProvider
 from ao.manifest import Manifest, Node, eval_when, parse
@@ -321,34 +322,6 @@ class RunRuntime:
         with tx() as conn:
             events.emit(conn, self.run_id, event, node_id=ctx.node_id, payload=payload)
 
-    def assert_action_allowed(self, ctx: Any) -> None:
-        node = self.manifest.node(ctx.node_id)
-        if node is None or node.kind != "action":
-            raise PermissionError(f"节点 {ctx.node_id} 不是 action 节点，禁止调用平台动作")
-
-    async def action_once(
-        self,
-        ctx: Any,
-        name: str,
-        params: dict[str, Any],
-        fn: Any,
-    ) -> Any:
-        """幂等地执行一次平台动作。
-
-        节点内崩溃后 LangGraph 会整节点重跑（研究文档 §1），所以动作边界必须去重：
-        同一个 (run, node, action, 参数) 只真执行一次，重跑时返回上次结果。
-        """
-        from ao import effects
-
-        return await effects.run_once(
-            run_id=self.run_id,
-            node_id=ctx.node_id,
-            action=name,
-            params=params,
-            epoch=self.epoch,
-            fn=lambda: fn(ctx=ctx, **params),
-        )
-
     async def call_agent(
         self,
         ctx: Any,
@@ -363,29 +336,39 @@ class RunRuntime:
     async def _turn(self, ctx: Any, *, prompt: str, repair: bool) -> str:
         node = self.manifest.node(ctx.node_id)
         timeout = float(node.timeout if node else 600)
+        # system 序言由 provider 拼接，且必须留痕（见设计 §7.2）
         system = ctx.system()
-        if self.current_node and self.current_node.kind == "agent":
-            # system 序言由 provider 拼接，且必须留痕（见设计 §7.2）
-            pass
-        reply: Reply = await self.provider.send(
-            run_id=self.run_id,
-            node_id=ctx.node_id,
-            attempt=ctx.attempt,
-            system=system,
-            prompt=prompt,
-            contract=contracts.contract_of({k: v.__name__ for k, v in _outputs_of(node).items()}),
-            repair=repair,
-            native_id=self.native_id,
-            context={
-                "capability": getattr(node, "capability", "read_only"),
-                "cwd": str(self.package.root),
-                "timeout": timeout,
-                # 工作流级工具：provider 侧把它们拼进 harness 的 MCP 补丁
-                "mcp_servers": self.mcp_servers,
-                "skills": self.skill_refs,
-            },
-            on_activity=lambda event: self._on_activity(ctx, event),
-        )
+        # 网关模式：本 turn 签一个虚拟 key。预算由网关按 key 硬限（超了 402），
+        # 账单靠 SpendLogs.api_key → gateway_keys 反查回归因；turn 结束即吊销。
+        virtual = await self._open_gateway_key(ctx, node)
+        try:
+            reply: Reply = await self.provider.send(
+                run_id=self.run_id,
+                node_id=ctx.node_id,
+                attempt=ctx.attempt,
+                system=system,
+                prompt=prompt,
+                contract=contracts.contract_of(
+                    {k: v.__name__ for k, v in _outputs_of(node).items()}
+                ),
+                repair=repair,
+                native_id=self.native_id,
+                context={
+                    "capability": getattr(node, "capability", "read_only"),
+                    "cwd": str(self.package.root),
+                    "timeout": timeout,
+                    # 工作流级工具：provider 侧把它们拼进 harness 的 MCP 补丁
+                    "mcp_servers": self.mcp_servers,
+                    "skills": self.skill_refs,
+                    # provider 用这两个覆盖全局 base_url/api_key（None 表示直连）
+                    "api_key": virtual.key if virtual else None,
+                    "gateway_base_url": gateway_root() if virtual else None,
+                },
+                on_activity=lambda event: self._on_activity(ctx, event),
+            )
+        finally:
+            if virtual is not None:
+                await self._close_gateway_key(virtual)
         if reply.native_id:
             self.native_id = reply.native_id
             self._save_step(ctx, reply.native_id)
@@ -410,6 +393,58 @@ class RunRuntime:
                 f"provider 返回 {reply.status}", status=reply.status, meta=reply.meta
             )
         return reply.text
+
+    async def _open_gateway_key(self, ctx: Any, node: Any) -> Any:
+        """签发本 turn 的虚拟 key；未启用网关或 mock 模式返回 None（直连上游）。"""
+        if not settings.gateway_enabled or settings.mock:
+            return None
+        from ao import gateway as gw
+
+        # spend 落库滞后 2-4s，签发前刷新一次，让 max_budget 尽量贴近真实剩余
+        with tx() as conn:
+            self.spent_usd = usage.refresh_run_spend(conn, self.run_id)
+        remaining = self.budget_usd - self.spent_usd if self.budget_usd > 0 else 0.0
+        if self.budget_usd > 0 and remaining <= 0:
+            raise gw.BudgetExceeded(
+                402, f"预算耗尽: {self.spent_usd:.6f}/{self.budget_usd:.6f}"
+            )
+        try:
+            virtual = await gw.current_gateway().issue_key(
+                run_id=self.run_id,
+                node_id=ctx.node_id,
+                attempt=ctx.attempt,
+                purpose="node",
+                budget_usd=max(remaining, 0.0),
+            )
+        except gw.BudgetExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 网关故障按配置决定降级或失败
+            if not settings.gateway_fail_open:
+                raise
+            logger.warning("网关不可用，按 fail-open 直连上游: %s", exc)
+            self.emit(ctx, "gateway.degraded", {"error": str(exc)[:300]})
+            return None
+        gw.bind_key(
+            virtual,
+            run_id=self.run_id,
+            node_id=ctx.node_id,
+            attempt=ctx.attempt,
+            purpose="node",
+            budget_usd=max(remaining, 0.0),
+        )
+        return virtual
+
+    async def _close_gateway_key(self, key: Any) -> None:
+        from ao import gateway as gw
+
+        try:
+            await gw.current_gateway().revoke_key(key.key)
+        except Exception:  # noqa: BLE001 — 吊销失败不能拖垮 turn，支出仍以流水为准
+            logger.warning("虚拟 key 吊销失败", exc_info=True)
+        try:
+            gw.mark_revoked(key.key_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("虚拟 key 登记表回写失败", exc_info=True)
 
     def _on_activity(self, ctx: Any, event: dict[str, Any]) -> None:
         tool = event.get("tool") or event.get("name")

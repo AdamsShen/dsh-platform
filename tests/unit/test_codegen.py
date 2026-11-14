@@ -40,7 +40,8 @@ def test_py_name_sanitizes() -> None:
     assert py_name("class") == "class_node"
 
 
-def test_action_node_imports_action() -> None:
+def test_action_kind_is_ignored() -> None:
+    """历史包仍可能带 kind="action"：一律按 agent 生成，不再产出 action 调用。"""
     manifest = parse(
         {
             "id": "wf",
@@ -49,6 +50,5 @@ def test_action_node_imports_action() -> None:
         }
     )
     source = generate_graph(manifest)
-    import_line = next(line for line in source.splitlines() if line.startswith("from wf_sdk"))
-    assert "action" in import_line
-    assert 'return await action("save")' in source
+    assert "await action(" not in source
+    assert source.count("await agent()") == 2

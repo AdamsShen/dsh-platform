@@ -14,6 +14,26 @@ from ao.package import load_package
 from ao.planner import orchestrator
 from ao.settings import settings
 
+ACTION_PLAN = {
+    "nodes": [
+        {
+            "id": "fetch",
+            "title": "取数",
+            "kind": "action",
+            "duty": "调用平台动作拉取原始数据",
+            "outputs": {"raw": "str"},
+        },
+        {
+            "id": "compose",
+            "title": "成稿",
+            "kind": "agent",
+            "duty": "把原始数据写成简报",
+            "outputs": {"text": "str"},
+        },
+    ],
+    "edges": [{"from": "fetch", "to": "compose"}],
+}
+
 PLAN = {
     "nodes": [
         {
@@ -83,6 +103,8 @@ async def test_generation_runs_seven_steps_and_publishes(isolated_dirs: Path) ->
     manifest = json.loads((package.root / "manifest.json").read_text(encoding="utf-8"))
     assert [node["id"] for node in manifest["nodes"]] == ["collect", "draft", "finalize"]
     assert manifest["edges"] == PLAN["edges"]
+    # 权限档位与 kind 解耦：agent 节点默认也能往 workspace/artifacts 落文件
+    assert [node["capability"] for node in manifest["nodes"]] == ["workspace_write"] * 3
     for node in manifest["nodes"]:
         assert (package.root / node["prompt"]).exists()
         assert (package.root / node["system"]).exists()
@@ -193,3 +215,70 @@ async def test_repair_round_recovers_and_publishes(
         (result.workflow_id,),
     )
     assert version is not None and version["status"] == "published"
+
+
+async def test_action_kind_is_ignored(isolated_dirs: Path) -> None:
+    """模型若仍输出 kind=action（旧提示词/缓存），一律按 agent 生成。
+
+    action 节点已整体移除：SDK 不再导出 action()，执行器没有动作白名单，生成器也不再
+    产出 `await action("<id>")` 调用桩。历史包里残留的 kind 字段只做忽略处理。
+    """
+    session = planner.session.create_session(tenant_id="default", user_id="u_001")
+    planner.session.append_message(session["id"], "user", "每天早上 8 点取数并出简报")
+    model = ScriptedModel(ACTION_PLAN)
+
+    result = await orchestrator.generate(session["id"], model=model)
+
+    assert result.ok, (result.stage, result.issues)
+    draft = Path(result.draft_dir)
+    manifest = json.loads((draft / "manifest.json").read_text(encoding="utf-8"))
+    assert [node["kind"] for node in manifest["nodes"]] == ["agent", "agent"]
+    assert "await action(" not in (draft / "graph.py").read_text(encoding="utf-8")
+
+    artifact = fetch_one(
+        "SELECT payload FROM planner_messages WHERE session_id = %s AND role = 'artifact'"
+        " AND (payload->>'step') = '2'",
+        (session["id"],),
+    )
+    assert artifact is not None
+    assert artifact["payload"]["nodes"] == ["fetch", "compose"]
+
+
+CAPABILITY_PLAN = {
+    "nodes": [
+        {
+            "id": "peek",
+            "title": "只读查看",
+            "kind": "agent",
+            "capability": "read_only",
+            "outputs": {"text": "str"},
+        },
+        {
+            "id": "escalate",
+            "title": "越权尝试",
+            "kind": "agent",
+            "capability": "danger-full-access",
+            "outputs": {"text": "str"},
+        },
+    ],
+    "edges": [{"from": "peek", "to": "escalate"}],
+}
+
+
+async def test_capability_defaults_and_explicit_override(isolated_dirs: Path) -> None:
+    """节点可显式收紧到 read_only；平台不开放的档位回落默认，不阻断生成。"""
+    session = planner.session.create_session(tenant_id="default", user_id="u_001")
+    planner.session.append_message(session["id"], "user", "只读看一眼再写一份简报")
+    model = ScriptedModel(CAPABILITY_PLAN)
+
+    result = await orchestrator.generate(session["id"], model=model)
+
+    assert result.ok, (result.stage, result.issues)
+    manifest = json.loads(
+        (Path(result.draft_dir) / "manifest.json").read_text(encoding="utf-8")
+    )
+    # peek 显式只读被尊重；escalate 要 danger-full-access，平台不开放 → 回落默认
+    assert [node["capability"] for node in manifest["nodes"]] == [
+        "read_only",
+        "workspace_write",
+    ]

@@ -2,10 +2,12 @@
 
 生成代码里只允许出现：
 
-    from wf_sdk import graph, node, agent, action, emit, parse_contract
+    from wf_sdk import graph, node, agent, emit, parse_contract
 
 不允许 `os` / `subprocess` / `socket` / `importlib` / `ctypes`；
 静态检查与运行期沙箱都由平台侧负责，本模块只保证"正常路径不需要别的 import"。
+
+每个节点都是一次 harness turn（`agent()`），平台不存在"非 LLM 的确定性动作"这一节点类型。
 """
 
 from __future__ import annotations
@@ -33,10 +35,8 @@ __all__ = [
     "graph",
     "node",
     "agent",
-    "action",
     "emit",
     "parse_contract",
-    "register_action",
     "ContractError",
     "NodeContext",
     "GraphSpec",
@@ -44,19 +44,6 @@ __all__ = [
 ]
 
 _RESULT_RE = re.compile(r"```result\s*\n(.*?)\n```", re.S)
-
-#: action 节点可调用的平台动作；P2 会改成 manifest 显式声明 + 静态检查。
-_ACTIONS: dict[str, Callable[..., Any]] = {}
-
-
-def register_action(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        if name in _ACTIONS:
-            raise ValueError(f"action 重复注册: {name}")
-        _ACTIONS[name] = fn
-        return fn
-
-    return decorator
 
 
 def node(
@@ -182,23 +169,6 @@ async def agent(
         mcp=list(mcp if mcp is not None else ctx.mcp),
         skills=list(skills if skills is not None else ctx.skills),
     )
-
-
-async def action(name: str, **params: Any) -> Any:
-    """调用平台白名单动作；只有 `kind="action"` 的节点允许调用。"""
-    ctx = current_context()
-    if ctx.runtime is not None:
-        ctx.runtime.assert_action_allowed(ctx)
-    fn = _ACTIONS.get(name)
-    if fn is None:
-        raise KeyError(f"未注册的 action: {name}")
-    if ctx.runtime is not None and hasattr(ctx.runtime, "action_once"):
-        # 执行器负责做去重（同一 run/node/action/参数只真执行一次）
-        return await ctx.runtime.action_once(ctx, name, dict(params), fn)
-    result = fn(ctx=ctx, **params)
-    if hasattr(result, "__await__"):
-        return await result
-    return result
 
 
 def emit(event: str, **payload: Any) -> None:

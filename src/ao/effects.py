@@ -14,6 +14,10 @@
 - 同一 epoch 内重复认领且未超过 stale → `EffectInFlight`（防同一进程并发双写）；
 - 行的 `owner_epoch` 更小 → 上一任已失权，直接 CAS 抢占，不必等 stale；
 - 同一 epoch 且超过 stale → 视为卡死，CAS 抢占。
+
+2026-11-14 起 action 节点已移除，`run_once` 暂时没有调用方（原先只被
+`RunRuntime.action_once` 调用）。实现与 `run_effects` 表保留：harness 经 MCP 触发的
+外部副作用同样会在节点重跑时重复执行，届时直接复用这里的键与接管语义。
 """
 
 from __future__ import annotations

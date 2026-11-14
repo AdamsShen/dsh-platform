@@ -106,6 +106,9 @@ class DshProvider:
                     cwd=str(context.get("cwd") or Path.cwd()),
                     context_pack=context_pack,
                     on_activity=_notify,
+                    # 网关模式：执行器按 turn 注入虚拟 key 与网关端点
+                    api_key=context.get("api_key"),
+                    base_url=context.get("gateway_base_url"),
                 ),
                 timeout=timeout,
             )

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,8 @@ from ao.runs import ensure_workflow, publish_version
 from ao.settings import settings
 from ao.smoke import run_smoke
 from ao.util import new_id
+
+logger = logging.getLogger(__name__)
 
 STEPS = (
     (1, "clarify", "澄清需求"),
@@ -55,6 +58,10 @@ _STAGE_STEP = {
     "smoke": 6,
     "publish": 7,
 }
+
+
+#: 平台开放的节点权限档位；full_access 在沙箱层就拒绝（ao/sandbox.py:47），不接受模型指定
+NODE_CAPABILITIES = frozenset({"read_only", "workspace_write"})
 
 
 def _step_no(stage: str) -> int:
@@ -149,13 +156,15 @@ def _clarify(context: dict[str, Any]) -> list[str]:
 def _nodes_prompt(requirement: str) -> str:
     return (
         "根据下面的需求，给出工作流节点清单。只输出 JSON：\n"
-        '{"nodes":[{"id":"英文小写id","title":"中文标题","kind":"agent|action",'
+        '{"nodes":[{"id":"英文小写id","title":"中文标题",'
         '"duty":"一句话职责","outputs":{"字段名":"str|int|bool|float"}}],'
         '"edges":[{"from":"a","to":"b"}],'
         '"schedule":{"cron":"分 时 日 月 周","timezone":"Asia/Shanghai"}}\n'
-        "约束：节点 2-6 个；第一个是取数/准备，最后一个是产出；边默认线性；"
-        "cron 是 5 段表达式。\n"
-        "需求里出现明确节奏（如每天 9 点、每周一早上）时输出 schedule，否则省略该字段。\n\n"
+        "约束：节点 2-6 个；第一个是取数/准备，最后一个是产出；边默认线性。\n"
+        "需求里只要出现时间表达（如\"每天早上 8 点\"\"每周一 9:00\"），就必须输出 schedule；"
+        "cron 五个字段依次是 分 时 日 月 周，时刻要与需求完全一致"
+        "（需求说 8 点就写 8 点，不要按\"早上\"的习惯改成 9 点）；"
+        "只有在需求完全没有时间表达时才省略 schedule。\n\n"
         f"需求：\n{requirement}"
     )
 
@@ -192,8 +201,16 @@ def _normalize_plan(
         _require(bool(node_id), "nodes", "E_NODES", f"第 {index} 个节点缺少 id")
         _require(node_id not in seen, "nodes", "E_NODES_DUP", f"节点 id 重复: {node_id}")
         seen.add(node_id)
-        kind = str(item.get("kind") or "agent")
-        _require(kind in {"agent", "action"}, "nodes", "E_NODES", f"{node_id} 的 kind 非法")
+        # action 节点已移除：模型若仍输出 kind=action（旧提示词/缓存），直接忽略按 agent 处理，
+        # 不报错也不留 kind_requested——这个字段已无任何下游消费方
+        # 节点可显式收紧权限；空值表示用平台默认（workspace_write）。非法值只告警不报错，
+        # 否则模型随手写个 full_access 就会卡住整条生成链
+        capability = str(item.get("capability") or "").strip()
+        if capability and capability not in NODE_CAPABILITIES:
+            logger.warning(
+                "节点 %s 的 capability=%s 不在平台开放范围，已回落默认档位", node_id, capability
+            )
+            capability = ""
         outputs = item.get("outputs") or {}
         _require(
             isinstance(outputs, dict)
@@ -206,11 +223,12 @@ def _normalize_plan(
             {
                 "id": node_id,
                 "title": str(item.get("title") or node_id),
-                "kind": kind,
                 "duty": str(item.get("duty") or "").strip(),
                 "outputs": {str(k): str(v) for k, v in outputs.items()},
                 "mcp": [str(x) for x in (item.get("mcp") or [])],
                 "skills": [str(x) for x in (item.get("skills") or [])],
+                # 空串 = 用平台默认 workspace_write
+                "capability": capability,
             }
         )
 
@@ -270,7 +288,7 @@ def _build_manifest(
         "nodes": [
             {
                 "id": node["id"],
-                "kind": node["kind"],
+                "kind": "agent",
                 "title": node["title"],
                 "prompt": f"prompts/{node['id']}.md",
                 "system": f"prompts/{node['id']}.system.md",
@@ -279,7 +297,10 @@ def _build_manifest(
                 # 节点级工具字段已废弃：工具绑定在工作流上，见 manifest["bindings"]
                 "mcp": [],
                 "skills": [],
-                "capability": "workspace_write" if node["kind"] == "action" else "read_only",
+                # 权限档位与执行方式解耦：agent 节点也要能往 workspace/artifacts 落文件。
+                # 沙箱只放开这两个子目录，prompts/contracts 仍只读（见 ao/sandbox.py:37-40），
+                # 因此默认给 workspace_write 不等于放权；节点可用 capability 显式收紧到 read_only
+                "capability": node.get("capability") or "workspace_write",
                 "retry": {"max": 1, "backoff": 10.0},
                 "timeout": 300,
             }

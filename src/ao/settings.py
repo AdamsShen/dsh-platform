@@ -72,6 +72,14 @@ class Settings:
     # --- 网关 / 计费 ---
     gateway_url: str = ""
     gateway_master_key: str = ""
+    # 打开后模型调用真的走 LiteLLM：每次 turn 签虚拟 key、预算交给网关硬限、
+    # 账单从 spend log 同步。关掉则是本地价目表估算（第一档行为）。
+    gateway_enabled: bool = False
+    # 网关不可用时是否直连上游。默认 false（fail closed）：宁可不跑，也不产生
+    # 无归因的账单。开启后会在事件里留 degraded 标记。
+    gateway_fail_open: bool = False
+    # spend log 落库有 2-4s 延迟（实测），所以同步是周期任务而不是调用后立即结算
+    gateway_sync_interval: float = 60.0
 
     # --- 沙箱 ---
     sandbox: str = "none"
@@ -136,6 +144,9 @@ class Settings:
             var_backoff_seconds=_float("AO_VAR_BACKOFF", 2.0),
             gateway_url=os.environ.get("AO_GATEWAY_URL", ""),
             gateway_master_key=os.environ.get("AO_GATEWAY_MASTER_KEY", ""),
+            gateway_enabled=_flag("AO_GATEWAY_ENABLED", False),
+            gateway_fail_open=_flag("AO_GATEWAY_FAIL_OPEN", False),
+            gateway_sync_interval=_float("AO_GATEWAY_SYNC_INTERVAL", 60.0),
             sandbox=os.environ.get("AO_SANDBOX", "none"),
             sandbox_profile=os.environ.get("AO_SANDBOX_PROFILE", "execution"),
             sandbox_mount_proc=_flag("AO_SANDBOX_MOUNT_PROC", True),

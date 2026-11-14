@@ -46,26 +46,17 @@ def _outputs_literal(node: Node) -> str:
 def _node_block(node: Node) -> str:
     func = py_name(node.id)
     title = f', title="{node.title}"' if node.title else ""
-    kind = ', kind="action"' if node.kind == "action" else ""
-    if node.kind == "action":
-        body = f'    return await action("{node.id}")'
-    else:
-        body = "    text = await agent()\n    return parse_contract(text, ctx.contract)"
+    # 每个节点都是一次 harness turn，没有第二种节点形态
+    body = "    text = await agent()\n    return parse_contract(text, ctx.contract)"
     return (
-        f'@node(id="{node.id}"{_outputs_literal(node)}{kind}{title})\n'
+        f'@node(id="{node.id}"{_outputs_literal(node)}{title})\n'
         f"async def {func}(ctx):\n"
         f"{body}\n\n"
     )
 
 
 def generate_graph(manifest: Manifest) -> str:
-    uses_action = any(node.kind == "action" for node in manifest.nodes)
-    uses_agent = any(node.kind != "action" for node in manifest.nodes)
-    imports = ["graph", "node"]
-    if uses_agent:
-        imports += ["agent", "parse_contract"]
-    if uses_action:
-        imports.append("action")
+    imports = ["graph", "node", "agent", "parse_contract"]
 
     parts = [
         _HEADER.format(

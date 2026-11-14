@@ -6,22 +6,23 @@ from ao.static_check import check_source
 MANIFEST = parse(
     {
         "id": "wf",
-        "nodes": [{"id": "draft"}, {"id": "save", "kind": "action"}],
+        "nodes": [{"id": "draft", "outputs": {"text": "str"}}, {"id": "save", "outputs": {"ok": "bool"}}],
         "edges": [{"from": "draft", "to": "save"}],
     }
 )
 
 GOOD = '''
-from wf_sdk import action, agent, graph, node, parse_contract
+from wf_sdk import agent, graph, node, parse_contract
 
-@node(id="draft")
+@node(id="draft", outputs={"text": str})
 async def draft(ctx):
     text = await agent()
     return parse_contract(text, ctx.contract)
 
-@node(id="save", kind="action")
+@node(id="save", outputs={"ok": bool})
 async def save(ctx):
-    return await action("save")
+    raw = await agent()
+    return parse_contract(raw, ctx.contract)
 
 G = graph(nodes=[draft, save], edges=[{"from": "draft", "to": "save"}])
 '''
@@ -40,7 +41,7 @@ def test_rejects_extra_import() -> None:
 
 
 def test_rejects_eval() -> None:
-    assert "E_EVAL" in codes(GOOD.replace('await action("save")', 'eval("1+1")'))
+    assert "E_EVAL" in codes(GOOD.replace("text = await agent()", 'text = eval("1+1")'))
 
 
 def test_rejects_module_level_side_effect() -> None:
@@ -55,13 +56,7 @@ def test_rejects_unbounded_loop() -> None:
 
 def test_rejects_attribute_escape() -> None:
     assert "E_ATTR_ESCAPE" in codes(
-        GOOD.replace("return parse_contract(text, ctx.contract)", 'return ().__class__')
-    )
-
-
-def test_rejects_agent_writing() -> None:
-    assert "E_AGENT_WRITE" in codes(
-        GOOD.replace("return parse_contract(text, ctx.contract)", 'return await action("save")')
+        GOOD.replace("return parse_contract(text, ctx.contract)", "return ().__class__")
     )
 
 

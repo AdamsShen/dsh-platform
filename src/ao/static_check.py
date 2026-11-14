@@ -115,7 +115,6 @@ def check_source(source: str, manifest: Manifest) -> list[Issue]:
                 )
             )
 
-    agent_nodes = {node.id for node in manifest.nodes if node.kind != "action"}
     func_to_id = _node_ids_from_ast(tree)
 
     for node in ast.walk(tree):
@@ -145,20 +144,6 @@ def check_source(source: str, manifest: Manifest) -> list[Issue]:
                 issues.append(
                     Issue("E_LOOP_UNBOUNDED", "禁止 while True", getattr(node, "lineno", 0))
                 )
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            node_id = func_to_id.get(node.name)
-            if node_id in agent_nodes:
-                for inner in ast.walk(node):
-                    if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name):
-                        if inner.func.id == "action":
-                            issues.append(
-                                Issue(
-                                    "E_AGENT_WRITE",
-                                    f"agent 节点 {node_id} 不允许调用 action",
-                                    getattr(inner, "lineno", 0),
-                                )
-                            )
-
     declared = _graph_decl(tree)
     if declared is None:
         issues.append(Issue("E_GRAPH_MISMATCH", "缺少 G = graph(nodes=[...], edges=[...])", 0))

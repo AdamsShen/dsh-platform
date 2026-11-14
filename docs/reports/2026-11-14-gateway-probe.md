@@ -32,18 +32,38 @@
 
 探针结果：**14/14 通过**。
 
-## 三、未完成：整条链路还没接线
+## 三、整条链路已接线（2026-11-14）
 
-代码侧发现：`issue_key` / `revoke_key` / `spend_logs` / `sync_spend_logs` **在 `src/` 里没有任何调用点**，`current_gateway()` 也从未被调用。目前 `runs.spent_usd` 完全来自 `usage.py` 的本地价目表估算（`llm_usage.model` 标 `mock-1`），网关适配器是死代码。
+原来 `issue_key` / `revoke_key` / `spend_logs` / `sync_spend_logs` 在 `src/` 里没有调用点，是死代码；现已按第二档接完，`AO_GATEWAY_ENABLED=1` 时生效（默认关，保持本地估算行为）。
 
-要真正以网关账单为准，需要补三块：
+1. **执行注入**：`executor._turn` 每 turn 调 `issue_key`，`max_budget` 取 run 剩余预算；`api_key` / `gateway_base_url` 经 provider `context` 透到 `_dsh_runtime._run_once` 的 `base_kwargs`，turn 结束 `finally` 吊销。预算超限由网关返回 402 → `BudgetExceeded` → `paused_budget`。
+2. **归因：改走签发表而非请求头**。原计划用 `x-litellm-spend-logs-metadata`，但 DSH 的 `DeepSeekHarnessConfig` 只有 `base_url`/`api_key`（`env` 只影响子进程环境），**没有自定义请求头入口**。所以改为「每 turn 签虚拟 key → `SpendLogs.api_key`（= `token`）反查 `migrations/011_gateway_keys.sql`」。`normalize_spend` 仍优先读 `metadata.spend_logs_metadata`，缺失时才反查。
+3. **定时同步**：`scheduler.sync_gateway_spend()` 按 `AO_GATEWAY_SYNC_INTERVAL`（默认 60s）拉「昨天到今天」（流水 2-4s 延迟 + 跨天边界），`sync_spend_logs` 按 `gateway_request_id` 去重并回刷 `runs.spent_usd`。
+4. **失败策略**：`AO_GATEWAY_FAIL_OPEN` 默认 0 = fail closed（网关不可用就报错，不产生无归因账单）；置 1 则直连上游并落 `gateway.degraded` 事件。
+5. **alias**：`key_alias` 加 `uuid4` 短后缀，规避「别名全局唯一且删除后仍占位」（事实 3）。
 
-1. **执行注入**：`_dsh_runtime.py` 已支持 `api_key` / `base_url`（`/Library/git-root/dsh-platform/src/ao/harness/_dsh_runtime.py:779`，取自 `settings.dsh_base_url`），但现在是全局配置。要按 `(run, node, attempt)` 签发并逐次注入，需把这两个值从 `settings` 提升为调用参数（影响 `harness/base.py` 协议签名）。
-2. **归因透传**：每次模型调用带 `x-litellm-spend-logs-metadata`（`run_id/node_id/attempt/purpose`）。这是结论 6 直接带来的简化——不必为归因建签发表。
-3. **定时同步**：scheduler 里周期性 `sync_spend_logs` 写 `llm_usage`，再刷新 `runs.spent_usd`；按 `gateway_request_id` 去重（结论 7 的延迟要求晚到补写）。
-4. **可选：签发表**：只在需要"事后按 key 追查某次尝试"或做 key 生命周期审计时才建；归因本身已不需要它。结论 3 说明 alias 不能复用，重签要加唯一后缀（时间戳或 attempt）。
+单测：`tests/unit/test_gateway_sync.py` 6 条（token 反查、header 优先、重复同步幂等、无归因丢弃、`base_url` 派生），全量 134 passed。
 
-风险点：注入虚拟 key 后，DSH 的所有模型调用都会打网关，`AO_GATEWAY_URL` 不可用时会 **跑不动**（当前是本地估算、可用）。所以接线必须带失败策略（网关不可用时降级还是 fail closed），这属于要拍板的设计取舍，先不擅自动。
+### 端到端实测（2026-11-14，真实 DeepSeek 上游）
+
+起真实 LiteLLM（`model=deepseek/deepseek-chat` 转发 `api.deepseek.com`），DSH 真实对话跑通：
+
+```
+[1] key=sk-PzaI5PRFY... token=06cbac822fb2...
+[2] DSH: ok 'ok' meta={'finish_reason': 'completed'}
+[3] 同步新增: 1
+[4] llm_usage: node_id=fetch, model=deepseek/deepseek-chat,
+    cost=0.000206, gateway_request_id=fc2b9243-...
+```
+
+过程中又钉住四个新事实（都已写进代码）：
+
+1. **DSH 走 Anthropic Messages 协议**：`POST /v1/messages`，`base_url` 必须是**根**（`http://gw:4000`），带 `/v1` 会拼成 `/v1/v1/messages`。所以 `gateway_root()` 与 `gateway_openai_base()` 分开，executor 注入根地址。
+2. **超预算返回 422 而不是 402**：`{"error":{"type":"budget_exceeded","code":"422","message":"Budget has been exceeded!..."}}`。必须按 message/type 识别，否则会当普通失败进重试循环。已在 `_dsh_runtime._is_budget_error` 映射为 `status="budget_exceeded"` → `paused_budget`。
+3. **`end_date` 按当天 00:00 解析**：只传今天会把今天的流水全部排除（实测 `end=2026-11-14` 返回 0 行，`end=2026-11-15` 返回 1 行）。同步窗口固定为「昨天 → 明天」。
+4. **mock_response 模型不产流**：即使 `stream:true` 也返回完整 JSON，DSH 会报 `Messages stream ended before message_stop`。所以验证 DSH 链路必须用真实上游，不能用 mock 模型。
+
+**仍未验证**：共享 Redis 多副本吊销；「被拒请求不写 SpendLogs」的对账语义；多副本下 `gateway_keys` 的并发写入（单机足够）。
 
 ## 四、遗留
 

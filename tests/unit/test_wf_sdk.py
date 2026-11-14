@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from wf_sdk import ContractError, action, graph, node, parse_contract, register_action
-from wf_sdk.runtime import NodeContext, reset_context, set_context
+from wf_sdk import ContractError, graph, node, parse_contract
 
 
 def test_node_requires_supported_outputs() -> None:
@@ -38,45 +35,9 @@ def test_parse_contract_type_check() -> None:
         parse_contract('```result\n{"count": "abc"}\n```', contract)
 
 
-async def test_action_goes_through_runtime_for_dedup() -> None:
-    """action() 必须交给执行器做去重，不能在 SDK 里直接调用副作用函数。"""
-    calls: list[str] = []
+def test_action_api_removed() -> None:
+    """action 节点已移除：SDK 不再导出 action / register_action。"""
+    import wf_sdk
 
-    @register_action("unit_notify")
-    def _notify(*, ctx, text: str) -> dict[str, bool]:
-        calls.append(text)
-        return {"ok": True}
-
-    class FakeRuntime:
-        def __init__(self) -> None:
-            self.seen: list[object] = []
-
-        def assert_action_allowed(self, ctx: NodeContext) -> None:
-            self.seen.append("allowed")
-
-        async def action_once(self, ctx, name, params, fn):  # type: ignore[no-untyped-def]
-            self.seen.append((name, params))
-            return fn(ctx=ctx, **params)
-
-    runtime = FakeRuntime()
-    ctx = NodeContext(
-        run_id="r1",
-        node_id="n1",
-        attempt=0,
-        vars={},
-        nodes={},
-        subject={},
-        package_root=Path("."),
-        workspace=Path("."),
-        artifacts=Path("."),
-        runtime=runtime,
-    )
-    token = set_context(ctx)
-    try:
-        result = await action("unit_notify", text="hi")
-    finally:
-        reset_context(token)
-
-    assert result == {"ok": True}
-    assert calls == ["hi"]
-    assert runtime.seen == ["allowed", ("unit_notify", {"text": "hi"})]
+    assert not hasattr(wf_sdk, "action")
+    assert not hasattr(wf_sdk, "register_action")

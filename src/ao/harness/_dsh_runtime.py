@@ -625,6 +625,21 @@ def _is_auth_error(error: dict[str, Any] | None) -> bool:
     return "authentication" in message or "invalid api key" in message
 
 
+def _is_budget_error(error: dict[str, Any] | None) -> bool:
+    """网关预算耗尽：LiteLLM 实测返回 **422**（不是 402），type=budget_exceeded。
+
+    必须单独识别并映射成 `status="budget_exceeded"`：否则会当普通 provider 失败，
+    进重试循环继续烧钱，而不是 `paused_budget` 等人工处理。
+    """
+    if not isinstance(error, dict):
+        return False
+    kind = str(error.get("type") or "").lower()
+    message = str(error.get("message") or "").lower()
+    if kind == "budget_exceeded":
+        return True
+    return "budget has been exceeded" in message or "budget exceeded" in message
+
+
 class DshProvider:
     """DSH provider：每轮一个子进程，靠 resume 续跑同一会话。"""
 
@@ -667,6 +682,8 @@ class DshProvider:
         context_pack: dict[str, Any] | None = None,
         extra_dirs: list[str] | None = None,
         on_activity: Any = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
     ) -> Any:
         from ao.harness.base import HarnessReply
 
@@ -712,6 +729,8 @@ class DshProvider:
                 patch_meta,
                 sandbox_mode,
                 runtime_meta,
+                api_key,
+                base_url,
             )
             return reply
         except Exception as exc:  # noqa: BLE001 — 降级为 fail，绝不把异常抛给编排层
@@ -748,6 +767,8 @@ class DshProvider:
         patch_meta: dict[str, Any],
         sandbox_mode: str | None = None,
         runtime_meta: dict[str, Any] | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
     ) -> Any:
         """线程内同步跑一轮：建进程 → resume/start → run → 关进程。"""
         from deepseek_harness import DeepSeekHarness
@@ -776,8 +797,9 @@ class DshProvider:
             "profile": _profile(),
             "patches": tuple(patches),
             "dsh_home": str(home),
-            "api_key": _api_key() or None,
-            "base_url": str(getattr(settings, "dsh_base_url", "") or "") or None,
+            # 网关模式由执行器按 turn 注入虚拟 key 与网关端点；缺省走全局配置
+            "api_key": api_key or _api_key() or None,
+            "base_url": base_url or str(getattr(settings, "dsh_base_url", "") or "") or None,
             # 注意：SDK 的请求超时只管单次 RPC，run 的等待要靠下面的看门狗
             "request_timeout_seconds": None,
         }
@@ -875,6 +897,15 @@ class DshProvider:
             meta["error"] = str(error.get("message") or "")[:300]
             meta["error_code"] = str(error.get("code") or "")
             meta["error_status"] = error.get("status")
+            if _is_budget_error(error):
+                # 预算耗尽不是失败：交给执行器抛 BudgetExceeded → paused_budget
+                return HarnessReply(
+                    status="budget_exceeded",
+                    text=str(error.get("message") or "") or "预算耗尽",
+                    session_id=session.id,
+                    native_id=native_id,
+                    meta={**meta, "budget": True},
+                )
             if _is_auth_error(error):
                 # 凭据问题不是阶段失败：交给图转 HITL（auth_block）等人工处理
                 return HarnessReply(

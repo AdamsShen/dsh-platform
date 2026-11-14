@@ -11,6 +11,7 @@ HTTP 路径按 LiteLLM Proxy 的公开接口写；接口若有差异，改这里
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -88,8 +89,11 @@ class LiteLLMGateway:
     async def issue_key(
         self, *, run_id: str, node_id: str, attempt: int, purpose: str, budget_usd: float
     ) -> VirtualKey:
+        # `key_alias` 全局唯一且删除后仍占位（实测事实 3），固定 alias 会让重试直接 400，
+        # 所以拼一个短后缀；归因不靠 alias，靠返回的 token 查 gateway_keys。
+        alias = f"{run_id}:{node_id}:{attempt}:{purpose}:{uuid.uuid4().hex[:8]}"
         payload = {
-            "key_alias": f"{run_id}:{node_id}:{attempt}:{purpose}",
+            "key_alias": alias,
             "metadata": {
                 "run_id": run_id,
                 "node_id": node_id,
@@ -101,8 +105,12 @@ class LiteLLMGateway:
         }
         async with self._client() as client:
             resp = await client.post("/key/generate", json=payload)
-        if resp.status_code == 402:
-            raise BudgetExceeded(402, resp.text)
+        # 签发侧预算拒绝是 402；调用侧超预算是 422（实测，type=budget_exceeded），
+        # 两种都要当预算问题处理，不能退化成可重试的网关错误。
+        if resp.status_code == 402 or (
+            resp.status_code == 422 and "budget" in resp.text.lower()
+        ):
+            raise BudgetExceeded(resp.status_code, resp.text[:300])
         if resp.status_code >= 400:
             raise GatewayError(resp.status_code, resp.text[:300])
         data = resp.json()
@@ -127,6 +135,7 @@ class LiteLLMGateway:
         LiteLLM 的 `/spend/logs` 现在返回按天聚合（`{spend, startTime, users, models}`），
         没有 `request_id`/`usage`，直接据此归因会全部丢弃；明细在 `/spend/logs/v2`，
         分页返回 `{data, page, total_pages}`。日期参数只接受 `YYYY-MM-DD`，带时分秒会 500。
+        注意 `end_date` 按当天 00:00 解析：要包含当天的流水必须传「明天」。
         """
         rows: list[dict[str, Any]] = []
         page = 1
@@ -164,6 +173,61 @@ def current_gateway() -> Gateway:
     return LiteLLMGateway()
 
 
+def gateway_root() -> str:
+    """网关根地址。
+
+    DSH 走 Anthropic Messages 协议（`POST /v1/messages`，实测），SDK 自己拼 `/v1`，
+    所以传给 harness 的 `base_url` 必须是根，不能带 `/v1`（否则变成 `/v1/v1/messages`）。
+    """
+    return (settings.gateway_url or "").rstrip("/")
+
+
+def gateway_openai_base() -> str:
+    """OpenAI 兼容端点（`/v1/chat/completions`），探针与 OpenAI SDK 用这个。"""
+    root = gateway_root()
+    return f"{root}/v1" if root and not root.endswith("/v1") else root
+
+
+def bind_key(
+    key: VirtualKey,
+    *,
+    run_id: str,
+    node_id: str,
+    attempt: int,
+    purpose: str,
+    budget_usd: float,
+) -> None:
+    """登记 token → 归因。签完 key 立刻写，进程崩了也能靠 token 反查。"""
+    from ao.db import tx
+
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO gateway_keys (key_token, key_alias, run_id, node_id, attempt,"
+            " purpose, budget_usd, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
+            " ON CONFLICT (key_token) DO NOTHING",
+            (
+                key.key_id,
+                f"{run_id}:{node_id}:{attempt}:{purpose}",
+                run_id,
+                node_id,
+                attempt,
+                purpose,
+                budget_usd,
+                key.expires_at,
+            ),
+        )
+
+
+def mark_revoked(key_token: str) -> None:
+    from ao.db import tx
+
+    with tx() as conn:
+        conn.execute(
+            "UPDATE gateway_keys SET revoked_at = now() WHERE key_token = %s",
+            (key_token,),
+        )
+
+
 def normalize_spend(row: dict[str, Any]) -> dict[str, Any]:
     """把网关流水映射成 `llm_usage` 需要的形状。
 
@@ -195,15 +259,39 @@ def normalize_spend(row: dict[str, Any]) -> dict[str, Any]:
 
 
 async def sync_spend_logs(*, start: str, end: str, gateway: Gateway | None = None) -> int:
-    """拉取网关流水写入 `llm_usage`；按 request_id 去重。返回新增行数。"""
+    """拉取网关流水写入 `llm_usage`；按 request_id 去重，并刷新受影响 run 的 spent_usd。
+
+    归因优先级：`metadata.spend_logs_metadata`（请求头透传，最准）→ 本地 `gateway_keys`
+    按 `api_key` 反查。后者是 DSH 路径的兜底：harness 不能保证透传自定义头，
+    只能靠每 turn 签的虚拟 key 认领流水。
+    """
     from ao.db import tx
 
     gateway = gateway or current_gateway()
     rows = await gateway.spend_logs(start=start, end=end)
     inserted = 0
+    touched: set[str] = set()
     with tx() as conn:
+        # 未知 token 一次批量反查，避免逐行打库
+        tokens = [str(raw.get("api_key") or "") for raw in rows]
+        tokens = [t for t in dict.fromkeys(tokens) if t]
+        bindings: dict[str, dict[str, Any]] = {}
+        if tokens:
+            found = conn.execute(
+                "SELECT key_token, run_id, node_id, attempt, purpose FROM gateway_keys"
+                " WHERE key_token = ANY(%s)",
+                (tokens,),
+            ).fetchall()
+            bindings = {row["key_token"]: row for row in found}
+
         for raw in rows:
             item = normalize_spend(raw)
+            if not item["run_id"] and item["key_token"] in bindings:
+                bound = bindings[item["key_token"]]
+                item["run_id"] = bound["run_id"]
+                item["node_id"] = bound["node_id"]
+                item["attempt"] = bound["attempt"]
+                item["purpose"] = bound["purpose"]
             if not item["run_id"] or not item["gateway_request_id"]:
                 continue
             result = conn.execute(
@@ -225,4 +313,12 @@ async def sync_spend_logs(*, start: str, end: str, gateway: Gateway | None = Non
                 ),
             )
             inserted += result.rowcount
+            touched.add(item["run_id"])
+
+        for run_id in touched:
+            conn.execute(
+                "UPDATE runs SET spent_usd = COALESCE("
+                "  (SELECT SUM(cost) FROM llm_usage WHERE run_id = %s), 0) WHERE id = %s",
+                (run_id, run_id),
+            )
     return inserted
