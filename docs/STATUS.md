@@ -6,7 +6,7 @@
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| P1-T01 业内方案复核 | ⬜ | 需要联网检索后落 `docs/research/`，未做不编造 |
+| P1-T01 业内方案复核 | ✅ | `docs/research/2026-11-13-execution-kernel.md`（2026-11-14 检索 6 组关键词，来源 12 条）：确认 LangGraph 恢复粒度是 super-step，节点内崩溃整节点重跑；SKIP LOCKED 必须叠加租约 + fencing + 外部幂等键；LiteLLM key 六端点与 `delete` 为归档；`bwrap --unshare-all` 的 user/cgroup 是 "try"，容器内失败点通常在 mount。据此列出 6 项差异（`sandbox` 能力探测、`--unshare-all` 注释过强、缺外部幂等键、缺 key 吊销/预算、durability 未实证、无部分索引），1/2/5 归 P1-T13 前置，3/4 归 P1-T12 前置 |
 | P1-T02 移植 DSH provider | ✅ | 2026-11-13 真实 key 验证：单轮 9.6s（含冷启动），示例工作流两节点 100% 成功；`scripts/probe_dsh.py` 可复跑 |
 | P1-T03 wf_sdk | ✅ | `src/wf_sdk/`，含契约、repair、路径越界保护 |
 | P1-T04 手写 graph + 加载器 | ✅ | `examples/daily_schedule/graph.py` + LangGraph 执行（mock 与真实 DSH 均跑通） |
@@ -17,8 +17,8 @@
 | P1-T09 停止 | ✅ | 节点边界取消；queued 立即取消 |
 | P1-T10 接管与 fencing | ✅ | epoch 校验 + 同机 resume + 过期回收 |
 | P1-T11 变量解析 | ✅ | `vars.py`，run 级预取 + 节点懒解析 + `run_vars` 缓存；agent 兜底按设计 §19.1 未启用 |
-| P1-T12 网关与记账 | 🟡 | 虚拟 key/spend log 适配器 + 去重；未连真实 LiteLLM 验证。**真跑时 `spent_usd=0`，因为本机没有网关，账单不可用** |
-| P1-T13~T17 沙箱 | 🟡 | 参数构造、输入中和、能力包、fail closed 已实现；bwrap 未在 Linux 实跑 |
+| P1-T12 网关与记账 | 🟡 | 虚拟 key/spend log 适配器 + 去重；未连真实 LiteLLM 验证。**真跑时 `spent_usd=0`，因为本机没有网关，账单不可用**。转 ✅ 前需补：`/key/delete` 吊销、签发带 `max_budget`/`budget_duration`、部署要求共享 Redis（复核见研究文档 §5） |
+| P1-T13~T17 沙箱 | 🟡 | 参数构造、输入中和、能力包、fail closed 已实现；bwrap 未在 Linux 实跑。2026-11-14 补 `sandbox.probe()`：实际起一次最小 bwrap 读 `uid_map` 断言 user namespace 真的生效（identity 映射判失败），带 60s 缓存；`executor` 真跑路径改为 `require_available()`（二进制 + 隔离双检），并按 bwrap(1) 修正 `--unshare-all` 的注释（user/cgroup 是 `-try`，不是强制）。单测 6 条，全量 110 passed |
 | P1-T18 验收演练 | ✅ | `scripts/drill.py`：正常/契约失败/取数失败/停止/接管/预算六个场景 6/6（mock，确定性）；真实 provider 已在 T02 覆盖 |
 
 ## P2 工作流生成
