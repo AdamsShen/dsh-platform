@@ -1,0 +1,118 @@
+{
+  "role": "小林",
+  "date": "2026-11-13",
+  "timezone": "Asia/Shanghai",
+  "mood": "平静",
+  "energy": 62,
+  "segments": [
+    {
+      "start": "09:30",
+      "end": "10:10",
+      "duration_minutes": 40,
+      "location": "卧室 / 卫生间",
+      "activity": "起床洗漱",
+      "intensity": "低",
+      "reason": "作息偏晚，用宽松的早晨节奏唤醒状态，不安排硬性任务。"
+    },
+    {
+      "start": "10:10",
+      "end": "10:40",
+      "duration_minutes": 30,
+      "location": "厨房",
+      "activity": "早午餐",
+      "intensity": "低",
+      "reason": "安静地吃一顿热食，为上午的轻量工作补充能量。"
+    },
+    {
+      "start": "10:40",
+      "end": "12:10",
+      "duration_minutes": 90,
+      "location": "书房",
+      "activity": "整理素材、回复委托邮件",
+      "intensity": "低",
+      "reason": "先把沟通与素材理顺，避免创作时被杂事打断。"
+    },
+    {
+      "start": "12:10",
+      "end": "13:00",
+      "duration_minutes": 50,
+      "location": "客厅",
+      "activity": "休息、听音乐",
+      "intensity": "低",
+      "reason": "在进入高强度创作前留出缓冲，保持平静情绪。"
+    },
+    {
+      "start": "13:00",
+      "end": "15:30",
+      "duration_minutes": 150,
+      "location": "书房",
+      "activity": "主插画稿集中创作",
+      "intensity": "高",
+      "reason": "精力 62 尚充足，把最费神的画面推进放在午后精力段。"
+    },
+    {
+      "start": "15:30",
+      "end": "16:00",
+      "duration_minutes": 30,
+      "location": "阳台",
+      "activity": "远眺放松眼睛",
+      "intensity": "低",
+      "reason": "长时间伏案后短暂离开画板，缓解眼疲劳与肩颈紧张。"
+    },
+    {
+      "start": "16:00",
+      "end": "18:00",
+      "duration_minutes": 120,
+      "location": "书房",
+      "activity": "线稿细化与上色",
+      "intensity": "高",
+      "reason": "承接上午的构图，趁手感连贯完成细节与配色。"
+    },
+    {
+      "start": "18:00",
+      "end": "19:00",
+      "duration_minutes": 60,
+      "location": "厨房 / 餐桌",
+      "activity": "晚餐",
+      "intensity": "低",
+      "reason": "按时吃饭并让大脑停机一小时，为晚间轻活动留余力。"
+    },
+    {
+      "start": "19:00",
+      "end": "20:30",
+      "duration_minutes": 90,
+      "location": "附近公园",
+      "activity": "散步采风",
+      "intensity": "低",
+      "reason": "安静地观察街景与光影，为插画积累素材也顺带活动身体。"
+    },
+    {
+      "start": "20:30",
+      "end": "22:30",
+      "duration_minutes": 120,
+      "location": "书房",
+      "activity": "自由速写与灵感收集",
+      "intensity": "低",
+      "reason": "不设产出的随手画，维持手感又不消耗过多精力。"
+    },
+    {
+      "start": "22:30",
+      "end": "23:30",
+      "duration_minutes": 60,
+      "location": "客厅",
+      "activity": "阅读、放松",
+      "intensity": "低",
+      "reason": "用低刺激的阅读收尾，帮助偏晚的作息平稳过渡到睡眠。"
+    },
+    {
+      "start": "23:30",
+      "end": "09:30",
+      "duration_minutes": 600,
+      "location": "卧室",
+      "activity": "睡眠",
+      "intensity": "低",
+      "reason": "保证约十小时睡眠，匹配偏晚作息并恢复次日精力。"
+    }
+  ],
+  "conflict_count": 0
+}

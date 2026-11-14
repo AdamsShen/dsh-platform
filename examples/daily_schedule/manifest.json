@@ -1,0 +1,95 @@
+{
+  "manifest_version": 2,
+  "id": "daily_schedule",
+  "version": 1,
+  "name": "角色日程（尖刀样例）",
+  "tenant": "default",
+  "limits": {
+    "max_nodes": 20,
+    "max_turns": 200,
+    "max_loops": 3,
+    "max_wall_seconds": 1800
+  },
+  "vars": {
+    "run": {
+      "today": {
+        "mcp": "clock",
+        "tool": "today",
+        "args": {}
+      }
+    },
+    "nodes": {
+      "draft": {
+        "role": {
+          "mcp": "roles",
+          "tool": "get",
+          "args": {
+            "id": "{{ subject.user_id }}"
+          }
+        },
+        "mood": {
+          "mcp": "mood",
+          "tool": "latest",
+          "args": {
+            "role_id": "{{ subject.user_id }}"
+          }
+        }
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "draft",
+      "title": "生成日程",
+      "kind": "agent",
+      "system": "prompts/draft.system.md",
+      "prompt": "prompts/draft.md",
+      "mcp": [],
+      "skills": [],
+      "capability": "workspace_write",
+      "outputs": {
+        "plan_path": "str",
+        "conflict_count": "int"
+      },
+      "timeout": 600,
+      "retry": {
+        "max": 2,
+        "backoff": 30
+      }
+    },
+    {
+      "id": "finalize",
+      "title": "整理交付",
+      "kind": "agent",
+      "system": "prompts/finalize.system.md",
+      "prompt": "prompts/finalize.md",
+      "mcp": [],
+      "skills": [],
+      "capability": "read_only",
+      "outputs": {
+        "ok": "bool",
+        "summary": "str"
+      },
+      "timeout": 300,
+      "retry": {
+        "max": 1,
+        "backoff": 10
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "draft",
+      "to": "finalize"
+    }
+  ],
+  "triggers": [
+    {
+      "type": "manual"
+    }
+  ],
+  "ui": {
+    "pages": []
+  },
+  "manifest_hash": "84ec53dcdf9b33c13b9d553ea33bd1b067e32a4f5e68ccc7ed36220bb105da3a"
+}
