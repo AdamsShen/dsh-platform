@@ -1,0 +1,167 @@
+"""进程级配置：环境变量 + 可选的 .env。
+
+只读配置，不在运行期改写。所有"新旧两套实现"的开关都必须在这里显式声明，
+避免出现"以为在跑真的、其实跑的是假的"。
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_dotenv() -> None:
+    """极简 .env 加载：只补缺失的键，不覆盖已有环境变量。"""
+    path = PROJECT_ROOT / ".env"
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip("'\"")
+
+
+def _flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    try:
+        return int(raw) if raw not in (None, "") else default
+    except ValueError:
+        return default
+
+
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    try:
+        return float(raw) if raw not in (None, "") else default
+    except ValueError:
+        return default
+
+
+@dataclass
+class Settings:
+    # --- 基础 ---
+    env: str = "dev"
+    db_url: str = "postgresql://ao:ao@127.0.0.1:55433/ao"
+    secret: str = "ao-dev-secret"
+    packages_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "packages")
+    data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / ".ao")
+    default_tenant: str = "default"
+
+    # --- 执行 ---
+    mock: bool = True
+    executor: str = "langgraph"
+    exec_slots: int = 24
+    coding_timeout_seconds: float = 1800.0
+    cancel_poll_seconds: float = 1.0
+    var_backoff_seconds: float = 2.0
+
+    # --- 网关 / 计费 ---
+    gateway_url: str = ""
+    gateway_master_key: str = ""
+
+    # --- 沙箱 ---
+    sandbox: str = "none"
+    sandbox_profile: str = "execution"
+
+    # --- 事件触发（P2-T18）---
+    # 空值表示只在 dev 环境放行事件入站；生产必须配，否则裸开等于给所有人一个触发器
+    event_token: str = ""
+
+    # --- 创作面（P2-T11）---
+    uploads_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "uploads")
+    upload_max_mb: float = 10.0
+    # 未压缩消息累计到这么多条才压一次，每次压最早的 N 条；逐轮压缩成本高且摘要易漂移
+    planner_summary_after: int = 20
+    planner_summary_batch: int = 10
+    # 生成失败（结构/静态检查/冒烟）时的回退轮数；1 表示不重试
+    authoring_repair_rounds: int = 3
+
+    # --- DSH（移植自 sortie-deck，字段名保持一致便于对照） ---
+    dsh_profile: str = "sdk"
+    dsh_llm_provider: str = "deepseek-official"
+    dsh_model: str = ""
+    dsh_max_tokens: int = 0
+    dsh_reasoning_effort: str = ""
+    dsh_permission_mode: str = "workspace-write"
+    dsh_home_root: str = ""
+    dsh_api_key: str | None = None
+    dsh_base_url: str | None = None
+    dsh_request_timeout_seconds: float = 0.0
+    dsh_session_log_upload: bool = False
+    dsh_isolate_skills: bool = True
+    dsh_isolate_home: bool = False
+    dsh_sandbox_auto_fallback: bool = False
+    dsh_sandbox_probe_ttl_seconds: float = 600.0
+    dsh_sandbox_probe_timeout_seconds: float = 30.0
+    dsh_sandbox_probe_prompt: str = (
+        "用 bash 执行 `echo __dsh_probe__`，然后只回答 ok。不要做其它事。"
+    )
+    dsh_sandbox_unavailable_hints: str = ""
+
+    @classmethod
+    def from_env(cls) -> Settings:
+        _load_dotenv()
+        return cls(
+            env=os.environ.get("AO_ENV", "dev"),
+            db_url=os.environ.get("AO_DB_URL", cls.db_url),
+            secret=os.environ.get("AO_SECRET", "ao-dev-secret"),
+            packages_dir=Path(os.environ.get("AO_PACKAGES_DIR", str(PROJECT_ROOT / "packages"))),
+            data_dir=Path(os.environ.get("AO_DATA_DIR", str(PROJECT_ROOT / ".ao"))),
+            default_tenant=os.environ.get("AO_DEFAULT_TENANT", "default"),
+            mock=_flag("AO_MOCK", True),
+            executor=os.environ.get("AO_EXECUTOR", "langgraph"),
+            exec_slots=_int("AO_EXEC_SLOTS", 24),
+            coding_timeout_seconds=_float("AO_CODING_TIMEOUT", 1800.0),
+            cancel_poll_seconds=_float("AO_CANCEL_POLL", 1.0),
+            var_backoff_seconds=_float("AO_VAR_BACKOFF", 2.0),
+            gateway_url=os.environ.get("AO_GATEWAY_URL", ""),
+            gateway_master_key=os.environ.get("AO_GATEWAY_MASTER_KEY", ""),
+            sandbox=os.environ.get("AO_SANDBOX", "none"),
+            sandbox_profile=os.environ.get("AO_SANDBOX_PROFILE", "execution"),
+            # 注意用 or：.env 里写了空值时应回落到默认目录，而不是 Path(".")
+            event_token=os.environ.get("AO_EVENT_TOKEN", ""),
+            uploads_dir=Path(os.environ.get("AO_UPLOADS_DIR") or str(PROJECT_ROOT / "uploads")),
+            upload_max_mb=_float("AO_UPLOAD_MAX_MB", 10.0),
+            planner_summary_after=_int("AO_PLANNER_SUMMARY_AFTER", 20),
+            planner_summary_batch=_int("AO_PLANNER_SUMMARY_BATCH", 10),
+            authoring_repair_rounds=_int("AO_AUTHORING_REPAIR_ROUNDS", 3),
+            dsh_profile=os.environ.get("AO_DSH_PROFILE", "sdk"),
+            dsh_llm_provider=os.environ.get("AO_DSH_LLM_PROVIDER", "deepseek-official"),
+            dsh_model=os.environ.get("AO_DSH_MODEL", ""),
+            dsh_max_tokens=_int("AO_DSH_MAX_TOKENS", 0),
+            dsh_reasoning_effort=os.environ.get("AO_DSH_REASONING_EFFORT", ""),
+            dsh_permission_mode=os.environ.get("AO_DSH_PERMISSION_MODE", "workspace-write"),
+            dsh_home_root=os.environ.get("AO_DSH_HOME_ROOT", ""),
+            dsh_api_key=(
+                os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("AO_DSH_API_KEY") or None
+            ),
+            dsh_base_url=os.environ.get("AO_DSH_BASE_URL") or None,
+            dsh_request_timeout_seconds=_float("AO_DSH_REQUEST_TIMEOUT", 0.0),
+            dsh_session_log_upload=_flag("AO_DSH_SESSION_LOG_UPLOAD", False),
+            dsh_isolate_skills=_flag("AO_DSH_ISOLATE_SKILLS", True),
+            dsh_isolate_home=_flag("AO_DSH_ISOLATE_HOME", False),
+            dsh_sandbox_auto_fallback=_flag("AO_DSH_SANDBOX_AUTO_FALLBACK", False),
+            dsh_sandbox_probe_ttl_seconds=_float("AO_DSH_SANDBOX_PROBE_TTL", 600.0),
+            dsh_sandbox_probe_timeout_seconds=_float("AO_DSH_SANDBOX_PROBE_TIMEOUT", 30.0),
+            dsh_sandbox_probe_prompt=os.environ.get(
+                "AO_DSH_SANDBOX_PROBE_PROMPT", cls.dsh_sandbox_probe_prompt
+            ),
+            dsh_sandbox_unavailable_hints=os.environ.get("AO_DSH_SANDBOX_UNAVAILABLE_HINTS", ""),
+        )
+
+
+settings = Settings.from_env()
