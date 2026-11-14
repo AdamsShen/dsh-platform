@@ -1,0 +1,126 @@
+topic: AI Agent 平台的模型调用网关：业界方案与开源选型
+generated_at: "2026-11-14"
+
+groups:
+  基本信息:
+    - name: name
+      description: 项目/产品名称
+      detail_level: 极简
+    - name: maintainer
+      description: 维护方（公司或社区），是否单一厂商主导
+      detail_level: 简要
+    - name: license
+      description: 开源许可证；若为 open-core，写明开源与商业的功能分界
+      detail_level: 详细
+    - name: stack
+      description: 实现语言与运行时依赖
+      detail_level: 简要
+    - name: latest_release
+      description: 最新版本号与发布日期（尽量落在 2025-11 之后）
+      detail_level: 简要
+    - name: activity
+      description: GitHub stars、近期提交活跃度、是否有正式发版节奏
+      detail_level: 简要
+
+  接入与兼容:
+    - name: openai_compat
+      description: 是否提供 OpenAI 兼容端点（/v1/chat/completions），客户端能否零改造接入
+      detail_level: 详细
+    - name: providers
+      description: 支持的上游 provider 数量与代表项，是否含自建/OpenAI 兼容自定义端点
+      detail_level: 简要
+    - name: streaming
+      description: 流式响应与流式下的用量统计是否可用
+      detail_level: 简要
+    - name: protocol_extras
+      description: 是否支持 MCP、Anthropic/Responses 等非 OpenAI 协议
+      detail_level: 简要
+
+  路由与可靠性:
+    - name: routing
+      description: 路由策略（权重、优先级、按标签、成本优先等）
+      detail_level: 简要
+    - name: fallback
+      description: 失败回退、重试、熔断能力
+      detail_level: 简要
+    - name: caching
+      description: 语义/精确缓存支持及其对计费的影响
+      detail_level: 简要
+
+  身份与预算:
+    - name: virtual_key
+      description: 是否支持签发子 key（虚拟 key），签发/吊销/轮换/过期的完整生命周期
+      detail_level: 详细
+    - name: budget_scope
+      description: 预算可挂在哪些维度（key / user / team / tag / 模型 / 全局）
+      detail_level: 详细
+    - name: hard_limit
+      description: 超预算时是服务端直接拒绝（硬限），还是仅告警（软限）；拒绝返回什么状态码
+      detail_level: 详细
+    - name: rate_limit
+      description: rpm/tpm/并发限制的维度与是否跨副本一致
+      detail_level: 简要
+
+  计量与归因:
+    - name: usage_source
+      description: 用量与费用的来源（provider 回传 usage、网关自算 cost、还是估算）
+      detail_level: 详细
+    - name: attribution
+      description: 流水里能归因到哪些维度；能否透传自定义 metadata（如 run_id/node_id/attempt）到 spend 记录
+      detail_level: 详细
+    - name: spend_api
+      description: 查询明细/聚合用量的接口形态（端点、分页、按时间窗过滤）
+      detail_level: 详细
+    - name: export
+      description: 导出与集成（OTel、Prometheus、S3、Webhook）
+      detail_level: 简要
+    - name: rejected_requests
+      description: 被拒绝的请求（超预算/无效 key）是否仍留审计记录
+      detail_level: 详细
+
+  部署与运维:
+    - name: deployment
+      description: 部署形态（独立服务 / sidecar / 数据面插件 / SaaS）
+      detail_level: 简要
+    - name: state_deps
+      description: 有状态依赖（Postgres/Redis/ClickHouse 等），多副本是否必须共享
+      detail_level: 详细
+    - name: k8s
+      description: Helm/K8s 部署成熟度
+      detail_level: 简要
+    - name: latency_overhead
+      description: 单请求引入的额外延迟（有公开 benchmark 则引用数字）
+      detail_level: 详细
+    - name: footprint
+      description: 资源占用（内存/CPU 量级）
+      detail_level: 简要
+
+  平台集成:
+    - name: sdk
+      description: 官方 SDK 与语言覆盖，Python 是否一等公民
+      detail_level: 简要
+    - name: per_request_key
+      description: 能否在每次请求上使用不同 key（本项目需要按 run/node/attempt 签发）
+      detail_level: 详细
+    - name: attempt_attribution
+      description: 能否做到「同一次逻辑调用的多次尝试」分别归因（重跑不串账）
+      detail_level: 详细
+    - name: fail_mode
+      description: 网关不可用时对调用方的影响与降级可能（fail closed / 直连上游）
+      detail_level: 详细
+
+  风险与成本:
+    - name: maturity
+      description: 生产验证程度、已知重大事故或 breaking change
+      detail_level: 简要
+    - name: governance
+      description: 治理模式（单一厂商、基金会、社区），路线图是否透明
+      detail_level: 简要
+    - name: self_host_cost
+      description: 自托管成本（组件数量、运维负担）
+      detail_level: 简要
+    - name: commercial
+      description: 商业版定价与哪些关键能力被划到付费
+      detail_level: 简要
+
+uncertain: []

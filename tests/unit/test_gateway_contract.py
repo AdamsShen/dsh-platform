@@ -102,5 +102,28 @@ def test_normalize_spend_exposes_key_token() -> None:
     assert mapped["gateway_request_id"] == "req-1"
     assert mapped["input_tokens"] == 3 and mapped["output_tokens"] == 4
     assert mapped["cost"] == 0.002
-    # 流水里没有 run 维度，只能靠 key_token 反查
+    # 未透传归因头时 run 维度为空，只能靠 key_token 反查
     assert mapped["run_id"] is None
+
+
+def test_normalize_spend_reads_nested_attribution() -> None:
+    """归因块在 metadata.spend_logs_metadata 里，不是 metadata 顶层。"""
+    row = {
+        "request_id": "req-2",
+        "api_key": "d" * 64,
+        "model": "gpt-4o-mini",
+        "spend": 0.001,
+        "metadata": {
+            "spend_logs_metadata": {
+                "run_id": "r1",
+                "node_id": "n1",
+                "attempt": 2,
+                "purpose": "node",
+            }
+        },
+    }
+    mapped = normalize_spend(row)
+    assert mapped["run_id"] == "r1"
+    assert mapped["node_id"] == "n1"
+    assert mapped["attempt"] == 2
+    assert mapped["purpose"] == "node"

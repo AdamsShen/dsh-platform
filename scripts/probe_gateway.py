@@ -121,10 +121,17 @@ async def probe_issue_key(client: httpx.AsyncClient) -> tuple[str, str]:
     return str(body.get("key") or ""), str(body.get("token") or "")
 
 
+# 归因字段：调用方要透传给网关，落在 SpendLogs.metadata.spend_logs_metadata
+ATTRIBUTION = {"run_id": RUN_ID, "node_id": NODE_ID, "attempt": 2, "purpose": "node"}
+
+
 async def probe_completion(client: httpx.AsyncClient, key: str) -> None:
     resp = await client.post(
         "/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}"},
+        headers={
+            "Authorization": f"Bearer {key}",
+            "x-litellm-spend-logs-metadata": json.dumps(ATTRIBUTION),
+        },
         json={"model": MODEL, "messages": [{"role": "user", "content": "probe"}]},
     )
     check(resp.status_code == 200, "虚拟 key 可调用模型", f"HTTP {resp.status_code}")
@@ -142,13 +149,20 @@ async def probe_spend_logs(client: httpx.AsyncClient, token: str) -> None:
         and isinstance(legacy_rows[0], dict)
         and "request_id" in legacy_rows[0]
     )
-    # 老端点已退化为按天聚合，这是网关事实（代码已改走 v2），探针只记录形态
+    # /spend/logs 默认 summarize=true 返回按天聚合；显式 summarize=false 才是明细
+    explicit = await client.get("/spend/logs", params={**params, "summarize": "false"})
+    explicit_rows = explicit.json() if explicit.status_code == 200 else []
+    explicit_is_detail = bool(
+        isinstance(explicit_rows, list)
+        and explicit_rows
+        and isinstance(explicit_rows[0], dict)
+        and "request_id" in explicit_rows[0]
+    )
     check(
         True,
         "老 /spend/logs 的返回形态已确认",
-        "逐条明细"
-        if legacy_is_detail
-        else "按天聚合（无 request_id）；gateway.py 已改走 /spend/logs/v2",
+        f"默认{'明细' if legacy_is_detail else '聚合（summarize 缺省为 true）'}；"
+        f"summarize=false 为{'明细' if explicit_is_detail else '聚合'}",
     )
 
     # 网关是异步落库，刚调完的流水不会立刻出现，必须轮询——接线时同步任务也要容忍这点
@@ -183,10 +197,12 @@ async def probe_spend_logs(client: httpx.AsyncClient, token: str) -> None:
         "normalize_spend 能取到 request_id",
         f"request_id={mapped['gateway_request_id']}",
     )
+    # 归因字段在 metadata.spend_logs_metadata，靠请求头透传；取不到才退回签发表反查
     check(
-        bool(mapped["run_id"]),
-        "normalize_spend 能取到 run_id",
-        "" if mapped["run_id"] else "spend log 没有 run 维度，需靠 api_key 反查本地签发表",
+        mapped["run_id"] == RUN_ID and mapped["node_id"] == NODE_ID and mapped["attempt"] == 2,
+        "spend_logs_metadata 能取回归因字段",
+        f"run_id={mapped['run_id']} node_id={mapped['node_id']} "
+        f"attempt={mapped['attempt']} purpose={mapped['purpose']}",
     )
 
 

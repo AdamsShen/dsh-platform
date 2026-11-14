@@ -1,0 +1,52 @@
+topic: AI Agent 平台的模型调用网关：业界方案与开源选型
+time_range: 2025-11 至今
+generated_at: "2026-11-14"
+purpose: >
+  回答本项目的问题：一个多 Agent 编排平台要做「按 run/节点/尝试次数」的成本归因与硬预算，
+  业界是用模型网关（LiteLLM 一类）解决，还是在编排层自己记账解决；如果上网关，开源里有哪几个可选。
+
+items:
+  - name: LiteLLM Proxy
+    category: 开源可自托管
+    description: BerriAI 出品，Python，MIT；虚拟 key / 预算 / spend log / 100+ provider 路由
+  - name: Portkey AI Gateway
+    category: 开源可自托管
+    description: TypeScript，Apache-2.0；网关 + 可观测，商业版有治理与团队预算
+  - name: Bifrost
+    category: 开源可自托管
+    description: Maxim AI 2025 年开源的 Go 网关，主打低延迟与高吞吐
+  - name: Envoy AI Gateway
+    category: 开源可自托管
+    description: Envoy 生态的 AI 网关项目，走数据面扩展路线
+  - name: Higress AI Gateway
+    category: 开源可自托管
+    description: 阿里开源，基于 Envoy + Istio，含 AI 插件与 token 限流
+  - name: Apache APISIX AI Gateway
+    category: 开源可自托管
+    description: Apache APISIX 的 AI 插件集，传统 API 网关路线
+  - name: Kong AI Gateway
+    category: 开源可自托管
+    description: Kong Gateway 3.x 的 AI 插件，需区分开源版与 Konnect 商业能力
+  - name: Helicone
+    category: 开源可自托管
+    description: 以 LLM 观测起家，提供代理模式与自托管
+  - name: OpenRouter
+    category: 商业托管
+    description: 多模型聚合的事实标准之一，按量计费，含 provider 路由与 fallback
+  - name: Cloudflare AI Gateway
+    category: 商业托管
+    description: Cloudflare 边缘网关，缓存/限流/日志，日志可导出
+  - name: Dify
+    category: 平台对标
+    description: 开源 LLM 应用平台，关注其模型调用、用量统计与额度实现方式
+  - name: LangGraph Platform 与 Temporal
+    category: 平台对标
+    description: 编排平台侧的成本/预算/用量控制方式，看是否在编排层做计量
+  - name: 用量计费组件（OpenMeter / Lago / Stripe Metering）
+    category: 计费组件
+    description: 把用量变成账单的那一层，用于判断是否需要引入独立计量系统
+
+execution:
+  batch_size: 4
+  items_per_agent: 1
+  output_dir: ./results

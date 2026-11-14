@@ -167,18 +167,23 @@ def current_gateway() -> Gateway:
 def normalize_spend(row: dict[str, Any]) -> dict[str, Any]:
     """把网关流水映射成 `llm_usage` 需要的形状。
 
-    run 维度不在流水里：`metadata` 是 LiteLLM 自己的请求级元数据，签 key 时写在 key 上的
-    metadata 不会带过来，请求体/header 里的 metadata 也不落库（2026-11-14 实测）。
-    所以 `run_id/node_id/attempt/purpose` 只能靠 `key_token`（= SpendLogs.api_key，
-    即 `/key/generate` 返回的 `token`）反查本地签发表，这里把 `key_token` 原样带出去。
+    归因信息在 `metadata.spend_logs_metadata`（比 `metadata` 深一层），来源是调用方
+    请求体里的 `metadata.spend_logs_metadata` 或请求头 `x-litellm-spend-logs-metadata`
+    （2026-11-14 实测，见 docs/reports/2026-11-14-gateway-probe.md）。
+    签发 key 时写在 key 上的 metadata **不会**进流水，所以不能用它做 run 归因。
+
+    兜底：`key_token`（= SpendLogs.api_key，即 `/key/generate` 返回的 `token`）始终存在，
+    调用方在拿不到 `spend_logs_metadata` 时可以凭它反查本地签发表。
     """
     metadata = row.get("metadata") or {}
+    # 请求级归因块；老版本或未透传时为空 dict
+    attribution = metadata.get("spend_logs_metadata") or {}
     return {
         "key_token": row.get("api_key"),
-        "run_id": metadata.get("run_id") or row.get("run_id"),
-        "node_id": metadata.get("node_id"),
-        "attempt": int(metadata.get("attempt") or 0),
-        "purpose": metadata.get("purpose") or "node",
+        "run_id": attribution.get("run_id") or metadata.get("run_id") or row.get("run_id"),
+        "node_id": attribution.get("node_id") or metadata.get("node_id"),
+        "attempt": int(attribution.get("attempt") or metadata.get("attempt") or 0),
+        "purpose": attribution.get("purpose") or metadata.get("purpose") or "node",
         "model": row.get("model") or "unknown",
         "input_tokens": int(row.get("prompt_tokens") or 0),
         "cached_tokens": int(row.get("cache_read_input_tokens") or 0),
