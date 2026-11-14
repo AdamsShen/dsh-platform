@@ -6,7 +6,7 @@
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| P1-T01 业内方案复核 | ✅ | `docs/research/2026-11-13-execution-kernel.md`（2026-11-14 检索 6 组关键词，来源 12 条）：确认 LangGraph 恢复粒度是 super-step，节点内崩溃整节点重跑；SKIP LOCKED 必须叠加租约 + fencing + 外部幂等键；LiteLLM key 六端点与 `delete` 为归档；`bwrap --unshare-all` 的 user/cgroup 是 "try"，容器内失败点通常在 mount。据此列出 6 项差异（`sandbox` 能力探测、`--unshare-all` 注释过强、缺外部幂等键、缺 key 吊销/预算、durability 未实证、无部分索引），1/2/5 归 P1-T13 前置，3/4 归 P1-T12 前置 |
+| P1-T01 业内方案复核 | ✅ | `docs/research/2026-11-13-execution-kernel.md`（2026-11-14 检索 6 组关键词，来源 12 条）：确认 LangGraph 恢复粒度是 super-step，节点内崩溃整节点重跑；SKIP LOCKED 必须叠加租约 + fencing + 外部幂等键；LiteLLM key 六端点与 `delete` 为归档；`bwrap --unshare-all` 的 user/cgroup 是 "try"，容器内失败点通常在 mount。据此列出 6 项差异（`sandbox` 能力探测、`--unshare-all` 注释过强、缺外部幂等键、缺 key 吊销/预算、durability 未实证、无部分索引），1/2/5 归 P1-T13 前置，3/4 归 P1-T12 前置。差异 3（外部副作用幂等键）已落地：`migrations/010_effects.sql` 的 `run_effects` + `ao.effects.run_once`，键 `(run_id,node_id,action,params_hash)` 不含 attempt，`owner_epoch` 判断接管，`wf_sdk.action()` 经 `RunRuntime.action_once` 走它 |
 | P1-T02 移植 DSH provider | ✅ | 2026-11-13 真实 key 验证：单轮 9.6s（含冷启动），示例工作流两节点 100% 成功；`scripts/probe_dsh.py` 可复跑 |
 | P1-T03 wf_sdk | ✅ | `src/wf_sdk/`，含契约、repair、路径越界保护 |
 | P1-T04 手写 graph + 加载器 | ✅ | `examples/daily_schedule/graph.py` + LangGraph 执行（mock 与真实 DSH 均跑通） |

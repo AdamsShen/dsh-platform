@@ -16,9 +16,11 @@ def database() -> None:
 @pytest.fixture(autouse=True)
 def clean_runs() -> None:
     with tx() as conn:
+        # triggers 之前没清，导致 e2e 用例之间互相污染（上一轮的 trigger 到期会混进
+        # fire_due 的结果里）。这里一并截断，测试之间不共享调度状态。
         conn.execute(
-            "TRUNCATE runs, run_nodes, run_steps, run_vars, run_events, llm_usage,"
-            " planner_messages, planner_sessions CASCADE"
+            "TRUNCATE runs, run_nodes, run_steps, run_vars, run_events, run_effects, llm_usage,"
+            " planner_messages, planner_sessions, trigger_events, triggers CASCADE"
         )
     yield
 

@@ -326,6 +326,29 @@ class RunRuntime:
         if node is None or node.kind != "action":
             raise PermissionError(f"节点 {ctx.node_id} 不是 action 节点，禁止调用平台动作")
 
+    async def action_once(
+        self,
+        ctx: Any,
+        name: str,
+        params: dict[str, Any],
+        fn: Any,
+    ) -> Any:
+        """幂等地执行一次平台动作。
+
+        节点内崩溃后 LangGraph 会整节点重跑（研究文档 §1），所以动作边界必须去重：
+        同一个 (run, node, action, 参数) 只真执行一次，重跑时返回上次结果。
+        """
+        from ao import effects
+
+        return await effects.run_once(
+            run_id=self.run_id,
+            node_id=ctx.node_id,
+            action=name,
+            params=params,
+            epoch=self.epoch,
+            fn=lambda: fn(ctx=ctx, **params),
+        )
+
     async def call_agent(
         self,
         ctx: Any,

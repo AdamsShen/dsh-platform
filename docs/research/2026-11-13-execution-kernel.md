@@ -263,6 +263,11 @@ LiteLLM 虚拟 key、bwrap/nsjail 在容器内可用性。
 - 第 7 项：`SandboxSpec` 新增 `mount_proc` / `mount_dev`（`AO_SANDBOX_MOUNT_PROC`、`AO_SANDBOX_MOUNT_DEV`，
   默认 1 = 保持原行为），`build_bwrap` 按开关决定是否挂载；`probe()` 固定挂 `/proc` 以便读 `uid_map`，
   与运行时开关无关。是否该长期关闭仍需在目标容器里实测 harness 对 `/proc` 的依赖后才能定。
+- 第 3 项：外部副作用幂等键已落地。`migrations/010_effects.sql` 建 `run_effects`，
+  键为 `(run_id, node_id, action, params_hash)`——**不含 attempt**，成功后重放直接返回旧结果；
+  接管用 `owner_epoch` 而不是时钟（旧 epoch 一律抢占，同 epoch 才看 stale 1800s）。
+  `wf_sdk.action()` 改为经执行器 `RunRuntime.action_once` 调用，SDK 侧不碰数据库。
+  覆盖范围仅限平台 action：agent 经 harness 调用的外部工具副作用不在平台控制内。
 
 ---
 

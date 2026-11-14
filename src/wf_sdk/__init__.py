@@ -192,6 +192,9 @@ async def action(name: str, **params: Any) -> Any:
     fn = _ACTIONS.get(name)
     if fn is None:
         raise KeyError(f"未注册的 action: {name}")
+    if ctx.runtime is not None and hasattr(ctx.runtime, "action_once"):
+        # 执行器负责做去重（同一 run/node/action/参数只真执行一次）
+        return await ctx.runtime.action_once(ctx, name, dict(params), fn)
     result = fn(ctx=ctx, **params)
     if hasattr(result, "__await__"):
         return await result
