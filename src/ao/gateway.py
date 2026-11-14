@@ -106,8 +106,14 @@ class LiteLLMGateway:
         if resp.status_code >= 400:
             raise GatewayError(resp.status_code, resp.text[:300])
         data = resp.json()
-        key_id = data.get("key_name") or data.get("token") or ""
-        return VirtualKey(key=data.get("key", ""), key_id=str(key_id))
+        # LiteLLM 返回的 `key_name` 是 `sk-...d4jw` 这种脱敏展示名，不能当标识；
+        # `token` 才是 key 的 hash，也等于 SpendLogs 里的 `api_key`，归因只能靠它。
+        key_id = data.get("token") or data.get("key_name") or ""
+        return VirtualKey(
+            key=data.get("key", ""),
+            key_id=str(key_id),
+            expires_at=data.get("expires"),
+        )
 
     async def revoke_key(self, key: str) -> None:
         async with self._client() as client:
@@ -116,13 +122,37 @@ class LiteLLMGateway:
             logger.warning("虚拟 key 吊销失败（保留支出即可，不阻塞收尾）: %s", resp.text[:200])
 
     async def spend_logs(self, *, start: str, end: str) -> list[dict[str, Any]]:
-        params = {"start_date": start, "end_date": end}
+        """拉逐条流水（不是每日汇总）。
+
+        LiteLLM 的 `/spend/logs` 现在返回按天聚合（`{spend, startTime, users, models}`），
+        没有 `request_id`/`usage`，直接据此归因会全部丢弃；明细在 `/spend/logs/v2`，
+        分页返回 `{data, page, total_pages}`。日期参数只接受 `YYYY-MM-DD`，带时分秒会 500。
+        """
+        rows: list[dict[str, Any]] = []
+        page = 1
         async with self._client() as client:
-            resp = await client.get("/spend/logs", params=params)
-        if resp.status_code >= 400:
-            raise GatewayError(resp.status_code, resp.text[:300])
-        data = resp.json()
-        return data if isinstance(data, list) else []
+            while True:
+                resp = await client.get(
+                    "/spend/logs/v2",
+                    params={
+                        "start_date": start,
+                        "end_date": end,
+                        "page": page,
+                        "page_size": 500,
+                    },
+                )
+                if resp.status_code >= 400:
+                    raise GatewayError(resp.status_code, resp.text[:300])
+                payload = resp.json()
+                data = payload.get("data") if isinstance(payload, dict) else payload
+                if not isinstance(data, list) or not data:
+                    break
+                rows.extend(data)
+                total_pages = payload.get("total_pages") if isinstance(payload, dict) else None
+                if page >= int(total_pages or 1):
+                    break
+                page += 1
+        return rows
 
 
 def current_gateway() -> Gateway:
@@ -135,9 +165,16 @@ def current_gateway() -> Gateway:
 
 
 def normalize_spend(row: dict[str, Any]) -> dict[str, Any]:
-    """把网关流水映射成 `llm_usage` 需要的形状。"""
+    """把网关流水映射成 `llm_usage` 需要的形状。
+
+    run 维度不在流水里：`metadata` 是 LiteLLM 自己的请求级元数据，签 key 时写在 key 上的
+    metadata 不会带过来，请求体/header 里的 metadata 也不落库（2026-11-14 实测）。
+    所以 `run_id/node_id/attempt/purpose` 只能靠 `key_token`（= SpendLogs.api_key，
+    即 `/key/generate` 返回的 `token`）反查本地签发表，这里把 `key_token` 原样带出去。
+    """
     metadata = row.get("metadata") or {}
     return {
+        "key_token": row.get("api_key"),
         "run_id": metadata.get("run_id") or row.get("run_id"),
         "node_id": metadata.get("node_id"),
         "attempt": int(metadata.get("attempt") or 0),
