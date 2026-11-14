@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% set stage_zh = {'chatting':'对话中','drafting':'草稿待确认','publishing':'发布中','published':'已发布','failed':'未通过'} %}
+{% block body %}
+<header class="top">
+  <div class="brand">AO · 创作面</div>
+  <div class="meta">
+    <span class="stage stage-{{ stage }}">{{ stage_zh.get(stage, stage) }}</span>
+    <code>{{ session.id }}</code>
+  </div>
+</header>
+
+<main class="split">
+  <section>
+    <div class="thread">
+      {% for m in messages %}
+      <article class="msg msg-{{ m.role }}">
+        <div class="who">{{ '我' if m.role == 'user' else m.role }}</div>
+        <div class="body">{{ m.content }}</div>
+      </article>
+      {% else %}
+      <p class="empty">说说你要的工作流：服务谁、多久跑一次、产出什么。信息不全也可以先发，生成时会标出缺口。</p>
+      {% endfor %}
+    </div>
+
+    <form class="composer" method="post" action="/planner/{{ session.id }}/messages">
+      <textarea name="content" rows="3"
+        placeholder="例如：每天早上 9 点给运营组生成昨日数据日报，输出 markdown"></textarea>
+      <div class="row">
+        <button type="submit">发送</button>
+        <button type="submit" class="ghost"
+          formaction="/planner/{{ session.id }}/generate" formnovalidate>生成草稿</button>
+      </div>
+    </form>
+
+    <form class="upload" method="post" action="/planner/{{ session.id }}/uploads"
+      enctype="multipart/form-data">
+      <input type="file" name="file" required>
+      <button type="submit" class="ghost">上传文档</button>
+    </form>
+  </section>
+
+  <aside class="panel">
+    <section class="card">
+      <h2>已确认的槽位</h2>
+      {% if slots %}
+      <dl>
+        {% for key, values in slots.items() %}
+        <dt>{{ key }}</dt>
+        <dd>{{ values | join('、') }}</dd>
+        {% endfor %}
+      </dl>
+      {% else %}
+      <p class="empty">还没有结构化信息</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>生成进度</h2>
+      <ol class="steps">
+        {% for item in artifacts %}
+        <li class="s-{{ item.status }}">
+          <span>{{ item.step }} {{ item.name }}</span>
+          <em>{{ item.status }}{% if item.attempt and item.attempt > 1 %} · 第 {{ item.attempt }} 轮{% endif %}</em>
+        </li>
+        {% else %}
+        <li class="empty">尚未生成</li>
+        {% endfor %}
+      </ol>
+    </section>
+
+    {% if issues %}
+    <section class="card err">
+      <h2>未通过</h2>
+      <ul>
+        {% for issue in issues %}
+        <li><code>{{ issue.code }}</code> {{ issue.message }}</li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    {% if nodes %}
+    <form class="card" method="post" action="/planner/{{ session.id }}/nodes">
+      <h2>草稿节点 <small>共 {{ nodes | length }} 个</small></h2>
+      {% for node in nodes %}
+      <details class="node" {% if loop.first %}open{% endif %}>
+        <summary><code>{{ node.id }}</code> · {{ node.title }}</summary>
+        <label>标题
+          <input type="text" name="title_{{ node.id }}" value="{{ node.title }}" required>
+        </label>
+        <label>职责
+          <input type="text" name="duty_{{ node.id }}" value="{{ node.duty }}">
+        </label>
+        <label>输出字段（JSON，类型限 str/int/bool/float）
+          <input type="text" name="outputs_{{ node.id }}" value="{{ node.outputs | tojson }}">
+        </label>
+        <label>提示词
+          <textarea name="prompt_{{ node.id }}" rows="6">{{ node.prompt }}</textarea>
+        </label>
+      </details>
+      {% endfor %}
+      <div class="row">
+        <button type="submit">保存修改</button>
+        <button type="submit" class="primary"
+          formaction="/planner/{{ session.id }}/publish">确认并发布</button>
+      </div>
+    </form>
+    {% endif %}
+
+    {% if nodes %}
+    <form class="card" method="post" action="/planner/{{ session.id }}/bindings">
+      <h2>工具绑定 <small>工作流级，所有节点共享</small></h2>
+      {% if available %}
+      <div class="bindings">
+        {% for item in available %}
+        <label class="check">
+          <input type="checkbox" name="binding" value="{{ item.kind }}:{{ item.ref }}"
+            {% if (item.kind ~ ':' ~ item.ref) in selected %}checked{% endif %}>
+          <span>{{ item.name }}</span>
+          <code>{{ item.kind }}:{{ item.ref }}</code>
+          <em>{{ '私有' if item.scope == 'private' else '全局' }}</em>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="row">
+        <button type="submit">保存绑定</button>
+      </div>
+      {% else %}
+      <p class="empty">还没有可用资源。先跑 <code>uv run python scripts/seed_resources.py</code> 注册示例资源。</p>
+      {% endif %}
+    </form>
+    {% endif %}
+
+    {% if nodes %}
+    <form class="card" method="post" action="/planner/{{ session.id }}/schedule">
+      <h2>定时触发 <small>发布后生效</small></h2>
+      <div class="row">
+        <label>cron
+          <input name="cron" value="{{ schedule.cron }}" placeholder="0 9 * * *">
+        </label>
+        <label>时区
+          <input name="timezone" value="{{ schedule.timezone }}">
+        </label>
+        <label>回填窗口(秒)
+          <input name="catchup_window_seconds" value="{{ schedule.catchup_window_seconds }}" size="8">
+        </label>
+        <label>最多补跑
+          <input name="catchup_limit" value="{{ schedule.catchup_limit }}" size="4">
+        </label>
+        <label>重叠策略
+          <select name="overlap_policy">
+            <option value="skip" {% if schedule.overlap_policy == 'skip' %}selected{% endif %}>跳过</option>
+            <option value="buffer_one" {% if schedule.overlap_policy == 'buffer_one' %}selected{% endif %}>缓冲一个</option>
+            <option value="cancel_other" {% if schedule.overlap_policy == 'cancel_other' %}selected{% endif %}>取消旧的</option>
+          </select>
+        </label>
+        <button type="submit">保存计划</button>
+      </div>
+      <p class="empty">5 段表达式（分 时 日 月 周），留空表示只手动触发。每个工作日 9 点 = <code>0 9 * * 1-5</code></p>
+      <p class="empty">调度器停机后，只补"回填窗口"内、且不超过"最多补跑"次数的错过时刻；窗口填 0 表示不补。</p>
+      <p class="empty">重叠策略：上一次还没跑完时，跳过 = 不排队；缓冲一个 = 等它结束后再补跑一次（缓冲已满则丢弃新的）；取消旧的 = 请求旧 run 在节点边界停止，随后启动新的。</p>
+      {% if active_trigger %}
+      <p class="hint">
+        已生效：<code>{{ active_trigger.cron }}</code>（{{ active_trigger.timezone }}），
+        策略 <b>{{ active_trigger.overlap_policy }}</b>，
+        下次触发 <b>{{ active_trigger.next_local }}</b>
+        {% if active_trigger.pending_local %}<br>缓冲待跑：<b>{{ active_trigger.pending_local }}</b>{% endif %}
+      </p>
+      <p class="hint">手动回填（只补历史时刻，不改下次计划）：<br>
+        <code>curl -X POST /api/workflows/{{ workflow_id }}/triggers/{{ active_trigger.id }}/backfill -H 'Content-Type: application/json' -d '{"start":"2026-11-01T00:00:00Z","end":"2026-11-07T00:00:00Z"}'</code>
+      </p>
+      {% endif %}
+      {% if event_plans %}
+      <p class="hint">事件触发：
+        {% for item in event_plans %}<code>POST /api/workflows/{{ workflow_id }}/events/{{ item.event_name }}</code>{% if not loop.last %}、{% endif %}{% endfor %}
+      </p>
+      {% endif %}
+    </form>
+    {% endif %}
+
+    {% if stage == 'published' %}
+    <section class="card ok">
+      <h2>已发布</h2>
+      <p>工作流 <code>{{ session.workflow_id }}</code>，版本 1。</p>
+    </section>
+    {% endif %}
+  </aside>
+</main>
+{% endblock %}
