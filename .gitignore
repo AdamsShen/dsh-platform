@@ -1,0 +1,42 @@
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# --- 测试与类型检查缓存 ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- 本地运行时数据（草稿、包仓库、上传物、日志、sqlite）---
+.ao/
+uploads/
+packages/*/
+!packages/.gitkeep
+*.log
+*.sqlite
+*.sqlite3
+.db/
+
+# --- 环境变量与密钥（只提交 .env.example）---
+.env
+.env.*
+!.env.example
+
+# --- 编辑器与系统 ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

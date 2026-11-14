@@ -1,0 +1,56 @@
+[project]
+name = "ao"
+version = "0.2.0"
+description = "DSH 编排平台（执行内核）"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "jinja2>=3.1",
+  "pydantic>=2.7",
+  "psycopg[binary,pool]>=3.2",
+  "langgraph>=0.6",
+  "langgraph-checkpoint-postgres>=2.0",
+  "python-multipart>=0.0.9",
+  # 纯 Python、无系统依赖；只覆盖数字版 PDF 的简单文本，表格/扫描件另议
+  "pypdf>=5.0",
+  "croniter>=7.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2", "pytest-asyncio>=0.24", "httpx>=0.27", "ruff>=0.5"]
+# DSH 官方 SDK：以子进程方式带 dsh 运行时（约 95MB/平台），不需要系统 Node
+harness = ["deepseek-harness-sdk==0.2.1rc2"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ao = ["web/templates/*.html"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# 从 sortie-deck 移植的运行时保持原样，便于两边对照
+"src/ao/harness/_dsh_runtime.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# 真跑用例默认跳过：pytest -m real 才执行（需要 DEEPSEEK_API_KEY）
+addopts = "-m 'not real'"
+markers = [
+  "integration: 需要本地 Postgres 的测试",
+  "real: 需要真实 DSH 与网关凭据的测试",
+]
