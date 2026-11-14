@@ -81,16 +81,6 @@ class Settings:
     # spend log 落库有 2-4s 延迟（实测），所以同步是周期任务而不是调用后立即结算
     gateway_sync_interval: float = 60.0
 
-    # --- 沙箱 ---
-    sandbox: str = "none"
-    sandbox_profile: str = "execution"
-    # 是否在沙箱内挂 /proc 与 /dev。非特权容器里这两个挂载点是最常见的失败点
-    # （实测：先报 mount proc 再报 pivot_root，见
-    # docs/research/2026-11-13-execution-kernel.md §4）。
-    # 默认开启以保持既有行为；受限容器里可关掉，但需自行确认 harness 不依赖它们。
-    sandbox_mount_proc: bool = True
-    sandbox_mount_dev: bool = True
-
     # --- 事件触发（P2-T18）---
     # 空值表示只在 dev 环境放行事件入站；生产必须配，否则裸开等于给所有人一个触发器
     event_token: str = ""
@@ -147,10 +137,6 @@ class Settings:
             gateway_enabled=_flag("AO_GATEWAY_ENABLED", False),
             gateway_fail_open=_flag("AO_GATEWAY_FAIL_OPEN", False),
             gateway_sync_interval=_float("AO_GATEWAY_SYNC_INTERVAL", 60.0),
-            sandbox=os.environ.get("AO_SANDBOX", "none"),
-            sandbox_profile=os.environ.get("AO_SANDBOX_PROFILE", "execution"),
-            sandbox_mount_proc=_flag("AO_SANDBOX_MOUNT_PROC", True),
-            sandbox_mount_dev=_flag("AO_SANDBOX_MOUNT_DEV", True),
             # 注意用 or：.env 里写了空值时应回落到默认目录，而不是 Path(".")
             event_token=os.environ.get("AO_EVENT_TOKEN", ""),
             uploads_dir=Path(os.environ.get("AO_UPLOADS_DIR") or str(PROJECT_ROOT / "uploads")),

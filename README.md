@@ -24,7 +24,7 @@ make run                                # 创作面 http://127.0.0.1:8000
 
 ```bash
 uv sync --all-extras          # 装 harness extra（含 DSH 运行时，约 95MB）
-AO_MOCK=0 AO_SANDBOX=none AO_ENV=dev uv run python scripts/run_example.py
+AO_MOCK=0 AO_ENV=dev uv run python scripts/run_example.py
 uv run python scripts/probe_dsh.py        # 单轮探针
 uv run python scripts/capacity_report.py  # 容量采样
 uv run pytest -m real                     # 真实 provider 用例（默认跳过）

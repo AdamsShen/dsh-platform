@@ -60,7 +60,8 @@ _STAGE_STEP = {
 }
 
 
-#: 平台开放的节点权限档位；full_access 在沙箱层就拒绝（ao/sandbox.py:47），不接受模型指定
+#: 平台开放的节点权限档位；full_access 不在开放集合内，不接受模型指定。
+#: 实际隔离由 harness 原生 permission mode 落实（见 ao/harness/_dsh_runtime.py）。
 NODE_CAPABILITIES = frozenset({"read_only", "workspace_write"})
 
 
@@ -298,8 +299,8 @@ def _build_manifest(
                 "mcp": [],
                 "skills": [],
                 # 权限档位与执行方式解耦：agent 节点也要能往 workspace/artifacts 落文件。
-                # 沙箱只放开这两个子目录，prompts/contracts 仍只读（见 ao/sandbox.py:37-40），
-                # 因此默认给 workspace_write 不等于放权；节点可用 capability 显式收紧到 read_only
+                # 隔离交给 harness 的 workspace-write：可写范围限于工作目录，prompts/contracts
+                # 不在其中，因此默认给 workspace_write 不等于放权；节点可用 capability 收紧到 read_only
                 "capability": node.get("capability") or "workspace_write",
                 "retry": {"max": 1, "backoff": 10.0},
                 "timeout": 300,

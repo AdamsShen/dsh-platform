@@ -510,12 +510,9 @@ def _outputs_of(node: Node | None) -> dict[str, type]:
 
 def classify(exc: BaseException) -> str:
     from ao.gateway import BudgetExceeded
-    from ao.sandbox import SandboxUnavailable
     from ao.vars import VarError
     from wf_sdk import ContractError
 
-    if isinstance(exc, SandboxUnavailable):
-        return "sandbox_unavailable"
     if isinstance(exc, BudgetExceeded):
         return "budget_exceeded"
     if isinstance(exc, VarError):
@@ -631,12 +628,6 @@ async def execute(run_id: str) -> str:
     try:
         package = load_package(run["package_ref"])
         manifest = parse(package.manifest)
-        from ao.sandbox import require_available
-
-        if not settings.mock:
-            # fail closed：真跑时二进制与隔离能力都要过（见 sandbox.probe 的 uid_map 断言）；
-            # mock 不起子进程，不受沙箱限制
-            require_available()
         provider = current_provider()
         runtime = RunRuntime(run=run, manifest=manifest, package=package, provider=provider)
 
