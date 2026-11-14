@@ -65,3 +65,77 @@ def test_input_sanitizer_fails_closed(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(Path, "unlink", boom)
     with pytest.raises(SandboxUnavailable, match="输入中和失败"):
         sandbox.sanitize_inputs(inputs)
+
+
+class _Completed:
+    """模拟 subprocess.run 的返回值，只暴露 probe 用到的字段。"""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_uid_map_identity_means_no_userns() -> None:
+    # 特权/未建 userns 时内核给出 identity 映射，不能算隔离成功
+    assert sandbox._uid_map_isolated("         0          0 4294967295\n") is False
+    assert sandbox._uid_map_isolated("         0       1000          1\n") is True
+    assert sandbox._uid_map_isolated("") is False
+
+
+def test_probe_reports_mount_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/bwrap")
+    message = "bwrap: No permissions to create new namespace, likely because ..."
+    monkeypatch.setattr(
+        sandbox.subprocess, "run", lambda *a, **k: _Completed(1, stderr=message + "\n")
+    )
+    ok, reason = sandbox.probe("bwrap", use_cache=False)
+    assert ok is False
+    assert "No permissions to create new namespace" in reason
+
+
+def test_probe_detects_identity_uid_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        sandbox.subprocess,
+        "run",
+        lambda *a, **k: _Completed(0, stdout="0 0 4294967295\n"),
+    )
+    ok, reason = sandbox.probe("bwrap", use_cache=False)
+    assert ok is False
+    assert "user namespace 未生效" in reason
+
+
+def test_probe_accepts_real_userns(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        sandbox.subprocess,
+        "run",
+        lambda *a, **k: _Completed(0, stdout="0 1000 1\n"),
+    )
+    assert sandbox.probe("bwrap", use_cache=False) == (True, "ok")
+
+
+def test_probe_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/bwrap")
+    calls = {"n": 0}
+
+    def fake_run(*_a, **_k):
+        calls["n"] += 1
+        return _Completed(0, stdout="0 1000 1\n")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    sandbox.reset_probe_cache()
+    assert sandbox.probe("bwrap")[0] is True
+    assert sandbox.probe("bwrap")[0] is True
+    assert calls["n"] == 1
+
+
+def test_require_available_blocks_when_probe_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        sandbox.subprocess, "run", lambda *a, **k: _Completed(1, stderr="Operation not permitted")
+    )
+    sandbox.reset_probe_cache()
+    with pytest.raises(SandboxUnavailable, match="隔离不可用"):
+        sandbox.require_available("bwrap")
