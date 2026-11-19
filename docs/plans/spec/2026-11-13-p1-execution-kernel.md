@@ -238,6 +238,7 @@ async def draft(ctx):
 > 正文保留原文未改。文中 `docs/superpowers/{research,specs,experiments,decisions}/...`
 > 形式的路径指向**原仓库**，未随迁；已落地文档在 `dsh-platform/docs/{research,reports}/`。
 > 本文件是**事前规格**（要做什么、如何验收），实际执行结果与偏离记录见 `docs/STATUS.md`。
+> **命令入口修正（2026-11-19）**：下文出现的 `scripts/demo.py` 在本仓不存在，等价入口是 `make demo`（内部调 `scripts/run_example.py`）。
 > 上游 `2026-11-13-roadmap-plan.md` 未迁入（不属于本平台计划），其 D1/D2/D3 结论已完整体现在下文 §3。
 
 def node(id: str, outputs: dict[str, type] | None = None, **kw) -> Callable: ...

@@ -4,6 +4,7 @@
 > 正文保留原文未改。文中 `docs/superpowers/{research,specs,experiments,decisions}/...`
 > 形式的路径指向**原仓库**，未随迁；已落地文档在 `dsh-platform/docs/{research,reports}/`。
 > 本文件是**事前规格**（要做什么、如何验收），实际执行结果与偏离记录见 `docs/STATUS.md`。
+> **命令入口修正（2026-11-19）**：下文 T11 提到的 `scripts/demo.py` 在本仓不存在，等价入口是 `make demo`（内部调 `scripts/run_example.py`）。
 
 日期：2026-11-13
 上游：`2026-11-13-p2-workflow-generation.md`（manifest v2 与包的 `ui/` 目录）
