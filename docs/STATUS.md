@@ -36,6 +36,17 @@
 | M3 | W31 对象存储 | ✅ | `AO_PACKAGE_BACKEND=s3`：发布上传、`resolve_ref` 按 `s3://` 下载并缓存；`tests/integration/test_package_s3.py` 3 条 |
 
 **M3 实测（2026-11-19）**：A/B 两个主体费用可分开查且合计等于总额；s3 引用二次解析命中缓存不访问对象存储；`s3` 模式缺 bucket 在发布期 `PackageError`；全量 162 passed。
+
+| 里程碑 | 工作项 | 状态 | 验收（可复跑） |
+|---|---|---|---|
+| M4a | W40 页面生成器调研 | ✅ | `docs/reports/2026-11-19-page-generator-research.md`（A2UI catalog、NL2UI 白名单、iframe sandbox 六项来源） |
+| M4a | W41 Page Schema v1 | ✅ | `src/ao/pages/schema.py`：15 组件 / 5 数据源 / 4 动作白名单，六种 E_* 错误码，拒绝 `on*` 与可执行片段；`tests/unit/test_page_schema.py` 12 条 |
+| M4a | W42 编译器 | ✅ | `src/ao/pages/compiler.py`：`index.html`+`app.js`+`theme.css`，两次编译字节一致，产物无 `eval(`/内联 `on*=`/`innerHTML`；`test_page_compiler.py` 9 条 |
+| M4a | W43 托管与沙箱 | ✅ | `/p/{wf}/{v}/{page}` 壳（`sandbox="allow-scripts"` 无 `allow-same-origin`）+ 静态资产白名单 + 5 分钟 token；发布期 `pages` 阶段编译，坏 Schema 阻断发布；`test_hosting.py` 5 条 + `test_page_build.py` 3 条 |
+| M4a | W44 数据源 | 🟡 | `run.list/run.get/run.events` 已实现并强制租户过滤；`artifact.read` / `mcp.read` 明确返回未实现（不返回空糊过去） |
+| M4a | W45 动作 | ⬜ | 编译产物里的按钮会 POST `/api/page/.../action`，该端点尚未实现 |
+
+**M4a 阶段实测（2026-11-19）**：全量 191 passed；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get` 返回 404。
 **未做（不算 ✅ 的部分）**：真实对象存储与多副本跨机接管尚未实测——`AO_PACKAGE_BACKEND=s3` 只在测试替身上验证，上云前需在真实 bucket 复跑一次。
 
 ## P1 执行内核

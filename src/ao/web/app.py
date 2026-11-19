@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ao import audit, resources
@@ -22,6 +22,8 @@ from ao import triggers as trigger_store
 from ao import users as users_store
 from ao.cron import timezone_of
 from ao.db import fetch_all, fetch_one
+from ao.pages import datasources as page_data
+from ao.pages import hosting as page_hosting
 from ao.planner import draft as draft_store
 from ao.planner import orchestrator
 from ao.planner import session as planner_session
@@ -482,6 +484,102 @@ def create_app() -> FastAPI:
                 )
             ]
         return {"ok": True, "actions": actions, "events": events}
+
+    def _tenant(request: Request) -> str:
+        """租户：A 期同样先用请求头，缺省落到默认租户（与路由层现有约定一致）。"""
+        return request.headers.get("X-Tenant-Id") or settings.default_tenant
+
+    @app.get("/p/{workflow_id}/{version}/{page_id}")
+    def page_shell(
+        request: Request, workflow_id: str, version: int, page_id: str
+    ) -> HTMLResponse:
+        """页面壳：渲染 iframe（只给 allow-scripts，不给 allow-same-origin）。"""
+        try:
+            root = page_hosting.package_root(workflow_id, version)
+            page_hosting.page_dir(root, page_id)
+        except page_hosting.HostingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        shell = page_hosting.shell_html(
+            workflow_id=workflow_id,
+            version=version,
+            page_id=page_id,
+            user_id=_user(request),
+            tenant_id=_tenant(request),
+        )
+        return HTMLResponse(
+            shell,
+            headers={
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/p/{workflow_id}/{version}/{page_id}/{asset:path}")
+    def page_asset(
+        workflow_id: str, version: int, page_id: str, asset: str
+    ) -> FileResponse:
+        """托管编译产物：只放行 index.html / app.js / theme.css / assets/**。"""
+        try:
+            root = page_hosting.package_root(workflow_id, version)
+            path = page_hosting.resolve_asset(root, page_id, asset)
+        except page_hosting.HostingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path,
+            headers={
+                "Content-Security-Policy": page_hosting.PAGE_CSP,
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                # 版本不可变：静态资源可长缓存；入口页带 token，禁缓存
+                "Cache-Control": (
+                    "no-store" if asset == "index.html" else "public, max-age=86400"
+                ),
+            },
+        )
+
+    @app.get("/api/page/{workflow_id}/{version}/{page_id}/data")
+    def page_data_endpoint(
+        request: Request, workflow_id: str, version: int, page_id: str
+    ) -> dict[str, Any]:
+        """页面数据：token 校验 + Schema 声明的数据源 + 租户强制过滤。"""
+        try:
+            payload = page_hosting.verify_token(request.query_params.get("token", ""))
+        except page_hosting.HostingError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if (
+            payload.get("w") != workflow_id
+            or int(payload.get("v") or -1) != int(version)
+            or payload.get("p") != page_id
+        ):
+            raise HTTPException(status_code=401, detail="token 与页面不匹配")
+
+        try:
+            root = page_hosting.package_root(workflow_id, version)
+            schema = page_hosting.page_schema(root, page_id)
+        except page_hosting.HostingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        name = request.query_params.get("source") or ""
+        declared = (schema.get("data") or {}).get(name)
+        if not isinstance(declared, dict):
+            raise HTTPException(status_code=400, detail=f"未声明的数据源: {name}")
+
+        params = {
+            key: value
+            for key, value in request.query_params.items()
+            if key not in {"token", "source"}
+        }
+        try:
+            rows = page_data.dispatch(
+                declared["source"], tenant_id=str(payload.get("t") or ""), params=params
+            )
+        except page_data.DataSourceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 单对象数据源查不到就是"不存在或无权访问"，不给 200 空 body 让前端误判
+        if not rows and declared["source"] in {"run.get", "run.events"}:
+            raise HTTPException(status_code=404, detail="对象不存在或无权访问")
+        return {"ok": True, "rows": rows}
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

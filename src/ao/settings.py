@@ -92,6 +92,10 @@ class Settings:
     # 空值表示只在 dev 环境放行事件入站；生产必须配，否则裸开等于给所有人一个触发器
     event_token: str = ""
 
+    # --- 页面托管（P4-T04）---
+    # 页面短期 token 的签名密钥；空值退回 AO_EVENT_TOKEN，再退回 dev 固定值
+    page_secret: str = ""
+
     # --- 运维接口（P5-T01）---
     # 主体目录的读写只对运维开放；空值表示仅 dev 放行（与事件入站同构）
     ops_token: str = ""
@@ -160,6 +164,7 @@ class Settings:
             # 注意用 or：.env 里写了空值时应回落到默认目录，而不是 Path(".")
             event_token=os.environ.get("AO_EVENT_TOKEN", ""),
             ops_token=os.environ.get("AO_OPS_TOKEN", ""),
+            page_secret=os.environ.get("AO_PAGE_SECRET", ""),
             fanout_budget_cap=_float("AO_FANOUT_BUDGET_CAP", 0.0),
             uploads_dir=Path(os.environ.get("AO_UPLOADS_DIR") or str(PROJECT_ROOT / "uploads")),
             upload_max_mb=_float("AO_UPLOAD_MAX_MB", 10.0),

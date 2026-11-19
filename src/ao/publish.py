@@ -12,6 +12,7 @@ from typing import Any
 from ao import resources, static_check, store
 from ao.manifest import parse
 from ao.package import PackageError, freeze_package, load_package
+from ao.pages.build import compile_all_pages
 from ao.smoke import run_smoke
 
 
@@ -110,6 +111,16 @@ async def publish(
                 ],
                 smoke=smoke_result,
             )
+
+    # 5.5 页面编译（P4-T09）：Schema → 静态代码，必须在 freeze 之前，产物才进 hash
+    pages = compile_all_pages(package.root)
+    if pages["issues"]:
+        return PublishResult(
+            ok=False,
+            stage="pages",
+            issues=pages["issues"],
+            smoke=smoke_result,
+        )
 
     # 6. 冻结 + 7. 落仓库
     manifest_hash, _ = freeze_package(package.root)
