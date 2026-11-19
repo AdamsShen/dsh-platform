@@ -54,6 +54,14 @@ M5 原计划用"子进程 + IPC"把这段代码关进无凭据进程。但既然
   （mock 模式自动跳过，`AO_STAGE_SUMMARY=0` 可关）。
 - 兼容：旧包不迁移，manifest 字段未变。
 
+## 边界：并行节点不做硬目录隔离
+
+计划里 G4（并行节点各写 `workspace/<node_id>/`、包根只读）**本轮不实施**。
+DSH 只有三档权限（`read-only` / `workspace-write` / `danger-full-access`），可写范围由 `cwd`
+决定，没有额外可写目录参数（`src/ao/harness/_dsh_runtime.py:93`、`:781`）。硬隔离要么把
+`cwd` 下沉并改全部 `artifacts/` 相对路径，要么每节点复制一份只读包，两者都超过当前收益
+（生成器只产串行链）。保留约定：并行节点产物写 `artifacts/<node_id>/...`。
+
 ## 验证
 
 - `tests/unit/test_stage_memory.py` 7 条：摘要追加、滚动只切整段、上游/产物注入、截断。
@@ -61,5 +69,9 @@ M5 原计划用"子进程 + IPC"把这段代码关进无凭据进程。但既然
   跨阶段 `native_id=None`，阶段内 repair 带上一轮 `native_id`，下一阶段 prompt 含上游产物。
 - `tests/integration/test_execute.py::test_contract_failure_repairs_once_then_fails`：
   多轮用尽（`repair_count=2`）才判失败。
+- `tests/integration/test_execute.py::test_node_turns_override_platform_default`：
+  `manifest.turns=2` 时该阶段只许首轮 + 1 次续轮（覆盖全局默认 3）。
+- `tests/integration/test_execute.py::test_stale_native_id_from_other_host_is_not_resumed`：
+  `run_steps` 里别的机器的 `native_id` 不会被本机续用。
 - `tests/e2e/test_generation.py`：冻结包内不存在 `graph.py`，页面与七步产物齐全。
-- 全量 234 passed。
+- 全量 240 passed。

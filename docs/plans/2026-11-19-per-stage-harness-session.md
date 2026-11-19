@@ -103,8 +103,21 @@ node_finished
 ### 4.4 并行
 
 - LangGraph 同一 superstep 的节点天然并行，每个节点各自开会话，会话层无冲突。
-- 冲突在文件系统：并行节点当前共享 `package.root`。改为 `workspace/<node_id>/` 可写、`artifacts/<node_id>/` 落产物，包根只读。
+- 冲突在文件系统：并行节点当前共享 `package.root`。理想形态是 `workspace/<node_id>/` 可写、`artifacts/<node_id>/` 落产物、包根只读。
 - 并行节点的上游指针在开始时快照，结束后再合并，避免读到半成品。
+
+**2026-11-19 结论（G4 暂不做硬隔离）**：DSH 的权限模型只有三档
+（`read-only` / `workspace-write` / `danger-full-access`），可写范围由 `cwd` 决定，
+没有"额外可写目录"参数——见 `src/ao/harness/_dsh_runtime.py:93` 的映射与
+`:781` 的档位落地点。要实现"包根只读 + 节点目录可写"只有两条路：
+
+1. `cwd` 下沉到 `workspace/<node_id>/`，再把节点产物由平台回收进 `artifacts/`；
+   代价是 `prompts/*.md` 里的 `artifacts/xxx` 相对路径全部失效，现有包与生成器都要改。
+2. 每个节点一个独立沙箱根（复制只读包 + 单独可写目录）；代价是每节点一份包拷贝。
+
+当前生成器只产串行链（`when` 分支也是单路径），并行踩踏的概率低于改造成本，
+因此本轮不做硬隔离，只保留约定：并行节点产物写 `artifacts/<node_id>/...`。
+若后续开放真正的并行扇出，再按路线 1 实施，并在验收里补"写包根失败"的用例。
 
 ## 5. 文件级改动清单
 
@@ -122,7 +135,7 @@ node_finished
 
 1. 两个相邻节点：`run_steps` 里两条 `native_id` 不相等；第二阶段 `prompt` 里不含第一阶段对话历史，但含其 `artifacts` 索引与 `memory.md` 摘要。
 2. 同一节点 repair 进入第 2 轮：`native_id` 与前一轮相同。
-3. 并行两节点：各自 `workspace/<node>/` 可写，写包根失败。
+3. ~~并行两节点：各自 `workspace/<node>/` 可写，写包根失败。~~ 暂缓，原因见 4.4（受 DSH 三档权限模型限制）。
 4. 删除 `graph.py` 中的可执行代码后，工作流仍能跑（证明执行体已完全收敛）。
 5. 跨机接管：`native_id` 不可用 → 重跑当前阶段而不是续会话（沿用现有语义）。
 

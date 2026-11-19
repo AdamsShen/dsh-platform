@@ -49,9 +49,9 @@
 | M4a | W48 免登录分享 | ✅ | `src/ao/share.py` + `/s/{token}`：token 只存 sha256，scope 编译成 SQL 谓词（不是取回再过滤）；动作 403 并落审计，撤销/过期/不存在 404，超 `max_uses` 429；`test_share.py` 5 条 |
 | M4a | W47 生成接入七步 | ✅ | 第 ④ 步由 `pages/generate.py` 产出真 Schema（筛选+表格+详情+事件）→ 校验 → 编译 → 页面冒烟；缺渲染器时点名组件（如 `chart`）并以 `stage=page/issues=E_PAGE_SMOKE` 阻断；`test_page_generate.py` 4 条 + 生成链断言 |
 | M4a | W46 编辑器 v1 | ✅ | `/planner/{sid}/pages/{page}` 树 + 属性面板（加列/换组件/挂动作/上下移/复制/删除/加块）+ 草稿态即时预览；改完即校验，非法不写盘；只写 `ui/pages/*.json` 与 `ui/compiled/`，`manifest.json` 字节不变（`test_page_editor.py` 7 条 + `test_page_editor_web.py` 3 条） |
-| M4a | W52 每阶段一会话 + 声明式 | ✅ | 2026-11-19 ADR-006：不再生成 `graph.py`，执行器直接读 `manifest.json` 构图；一阶段 = 一个新 harness 会话，阶段内多轮（`AO_STAGE_MAX_TURNS`）续同一 `native_id`；跨阶段靠 `memory.md`（LLM 摘要）+ 产物索引 bootstrap。`test_stage_memory.py` 7 条 + 会话边界集成用例 + 全量 234 passed |
+| M4a | W52 每阶段一会话 + 声明式 | ✅ | 2026-11-19 ADR-006：不再生成 `graph.py`，执行器直接读 `manifest.json` 构图；一阶段 = 一个新 harness 会话，阶段内多轮续同一 `native_id`（轮数可用节点级 `turns` 覆盖全局 `AO_STAGE_MAX_TURNS`），跨阶段靠 `memory.md`（LLM 摘要）+ 产物索引 bootstrap；跨机 `native_id` 不续用。并行节点硬目录隔离受 DSH 三档权限限制，本轮不做（见 ADR-006「边界」）。`test_stage_memory.py` 7 条 + 会话边界/turns/跨机集成用例 + 全量 240 passed |
 
-**M4a 阶段实测（2026-11-19）**：全量 234 passed（W52 声明化后）；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get`/`run.cancel` 均 404 并留审计；编译产物按 `/{数据源名}` 取数，服务端只认 Schema 声明过的键。
+**M4a 阶段实测（2026-11-19）**：全量 240 passed（W52 声明化 + turns + 跨机接管后）；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get`/`run.cancel` 均 404 并留审计；编译产物按 `/{数据源名}` 取数，服务端只认 Schema 声明过的键。
 **未做（不算 ✅ 的部分）**：真实对象存储与多副本跨机接管尚未实测——`AO_PACKAGE_BACKEND=s3` 只在测试替身上验证，上云前需在真实 bucket 复跑一次。
 
 ## P1 执行内核

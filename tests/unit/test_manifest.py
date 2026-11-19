@@ -59,3 +59,20 @@ def test_max_nodes_limit() -> None:
     nodes = [{"id": f"n{i}"} for i in range(5)]
     with pytest.raises(ValueError, match="超过上限"):
         parse(base(nodes=nodes, edges=[], limits={"max_nodes": 3}))
+
+
+def test_turns_defaults_to_none() -> None:
+    """不声明 turns 时用平台默认轮数，不把默认值写进声明。"""
+    manifest = parse(base())
+    assert all(node.turns is None for node in manifest.nodes)
+
+
+def test_turns_accepts_in_range() -> None:
+    manifest = parse(base(nodes=[{"id": "a", "turns": 2}], edges=[]))
+    assert manifest.node("a").turns == 2
+
+
+@pytest.mark.parametrize("turns", [0, 21])
+def test_turns_out_of_range_rejected(turns: int) -> None:
+    with pytest.raises(ValueError, match="turns 必须在 1~20"):
+        parse(base(nodes=[{"id": "a", "turns": turns}], edges=[]))

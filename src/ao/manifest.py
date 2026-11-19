@@ -61,6 +61,9 @@ class Node(BaseModel):
     outputs: dict[str, str] = Field(default_factory=dict)
     when: str | None = None
     timeout: int = 600
+    #: 阶段内允许的 harness 轮数（含首轮）。None 表示用平台默认（AO_STAGE_MAX_TURNS）；
+    #: 只约束本阶段的会话内续轮，与工作流的 limits.max_turns（全局 turn 预算）不是一回事
+    turns: int | None = None
     retry: Retry = Field(default_factory=Retry)
 
 
@@ -291,6 +294,9 @@ def validate_graph(manifest: Manifest) -> None:
                     )
         node.mcp = list(dict.fromkeys(node.mcp))
         node.skills = list(dict.fromkeys(node.skills))
+        # 单阶段轮数上限收在 20：再高只会让失败节点反复烧 token，不如人工介入
+        if node.turns is not None and not 1 <= node.turns <= 20:
+            raise ValueError(f"节点 {node.id} 的 turns 必须在 1~20 之间: {node.turns}")
         if node.when:
             match = _WHEN_RE.match(node.when)
             if not match:

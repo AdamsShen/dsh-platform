@@ -391,6 +391,12 @@ def _build_manifest(
                 # 不在其中，因此默认给 workspace_write 不等于放权；
                 # 节点可用 capability 收紧到 read_only
                 "capability": node.get("capability") or "workspace_write",
+                # 模型显式给了合法轮数就透传；不给则该阶段用平台默认轮数
+                **(
+                    {"turns": node["turns"]}
+                    if isinstance(node.get("turns"), int) and 1 <= node["turns"] <= 20
+                    else {}
+                ),
                 "retry": {"max": 1, "backoff": 10.0},
                 "timeout": 300,
             }

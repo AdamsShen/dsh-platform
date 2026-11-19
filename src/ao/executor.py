@@ -597,7 +597,9 @@ class RunRuntime:
         prompt = f"{block}\n\n---\n\n{ctx.prompt()}" if block else ctx.prompt()
         text = await self._turn(ctx, prompt=prompt, repair=False)
         data, errors = contracts.validate(text, outputs)
-        max_turns = max(1, int(getattr(settings, "stage_max_turns", 3)))
+        # 节点可在 manifest 里声明 turns（本阶段会话内轮数），否则用平台默认
+        allowed = node.turns or getattr(settings, "stage_max_turns", 3)
+        max_turns = max(1, int(allowed))
         turn = 1
         while errors and turn < max_turns:
             turn += 1

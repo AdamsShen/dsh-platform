@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import shutil
+from pathlib import Path
+
 import pytest
 
 from ao.db import fetch_all, fetch_one, tx
@@ -11,9 +15,9 @@ from ao.settings import PROJECT_ROOT
 EXAMPLE = PROJECT_ROOT / "examples" / "daily_schedule"
 
 
-def publish(subject: dict, window: str) -> str:
-    manifest_hash, _ = freeze_package(EXAMPLE)
-    manifest = load_package(EXAMPLE).manifest
+def publish(subject: dict, window: str, root: Path = EXAMPLE) -> str:
+    manifest_hash, _ = freeze_package(root)
+    manifest = load_package(root).manifest
     with tx() as conn:
         conn.execute(
             "INSERT INTO tenants (id, name) VALUES ('default','default') ON CONFLICT DO NOTHING"
@@ -23,13 +27,13 @@ def publish(subject: dict, window: str) -> str:
         manifest["id"],
         version=manifest["version"],
         manifest_hash=manifest_hash,
-        package_ref=str(EXAMPLE),
+        package_ref=str(root),
     )
     run_id, _ = create_run(
         tenant_id="default",
         workflow_id=manifest["id"],
         version=manifest["version"],
-        package_ref=str(EXAMPLE),
+        package_ref=str(root),
         subject=subject,
         window=window,
     )
@@ -228,3 +232,63 @@ async def test_cross_stage_fresh_session_and_in_stage_resume(
     draft_calls = [call for call in retry_provider.calls if call["node_id"] == "draft"]
     assert draft_calls[0]["native_id"] is None
     assert draft_calls[1]["native_id"] == "mock-draft-0"
+
+
+@pytest.mark.integration
+async def test_node_turns_override_platform_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """manifest 里声明 turns=2 时，该阶段只允许首轮 + 1 次续轮（覆盖全局默认 3）。"""
+    import ao.executor as executor_mod
+    from ao.harness.mock import MockProvider
+
+    root = tmp_path / "daily_schedule"
+    shutil.copytree(EXAMPLE, root)
+    manifest_path = root / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for node in data["nodes"]:
+        if node["id"] == "draft":
+            node["turns"] = 2
+    manifest_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setenv("AO_FAIL_NODE", "draft")
+    provider = MockProvider(delay=0.0)
+    monkeypatch.setattr(executor_mod, "current_provider", lambda: provider)
+
+    run_id = publish({"user_id": "u_001", "name": "小林"}, "w5", root=root)
+    assert await execute(run_id) == "failed"
+
+    node = fetch_one(
+        "SELECT repair_count FROM run_nodes WHERE run_id = %s AND node_id = 'draft'", (run_id,)
+    )
+    assert node["repair_count"] == 1
+    assert len([c for c in provider.calls if c["node_id"] == "draft"]) == 2
+
+
+@pytest.mark.integration
+async def test_stale_native_id_from_other_host_is_not_resumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """跨机接管：run_steps 里的 native_id 属于别的机器，本机必须重开阶段而不是续会话。"""
+    import ao.executor as executor_mod
+    from ao.harness.mock import MockProvider
+
+    monkeypatch.delenv("AO_FAIL_NODE", raising=False)
+    run_id = publish({"user_id": "u_001", "name": "小林"}, "w6")
+
+    # 伪造"上一次在别的机器上跑到一半"的痕迹
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO run_steps (run_id, node_id, attempt, step, native_id, host, phase)"
+            " VALUES (%s, 'draft', 0, 0, 'remote-session-id', 'another-host', 'turn')",
+            (run_id,),
+        )
+
+    provider = MockProvider(delay=0.0)
+    monkeypatch.setattr(executor_mod, "current_provider", lambda: provider)
+    assert await execute(run_id) == "succeeded"
+
+    draft_first = next(
+        call for call in provider.calls if call["node_id"] == "draft" and not call["repair"]
+    )
+    assert draft_first["native_id"] is None
