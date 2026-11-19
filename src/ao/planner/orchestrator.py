@@ -25,6 +25,9 @@ from ao import triggers as trigger_store
 from ao.cron import validate_cron
 from ao.manifest import NODE_BINDING_LIMIT, parse
 from ao.package import freeze_package, load_package
+from ao.pages import compiler as page_compiler
+from ao.pages import schema as page_schema
+from ao.pages.generate import generate_page, smoke_page
 from ao.planner import draft as draft_store
 from ao.planner import memory
 from ao.planner import session as planner_session
@@ -53,6 +56,8 @@ _STAGE_STEP = {
     "nodes": 2,
     "package": 3,
     "graph": 4,
+    # 页面属于第 ④ 步的产物（graph.py + ui/），失败定位到同一步
+    "page": 4,
     "static": 5,
     "bindings": 5,
     "smoke": 6,
@@ -383,7 +388,8 @@ def _build_manifest(
                 "skills": list(node.get("skills") or []),
                 # 权限档位与执行方式解耦：agent 节点也要能往 workspace/artifacts 落文件。
                 # 隔离交给 harness 的 workspace-write：可写范围限于工作目录，prompts/contracts
-                # 不在其中，因此默认给 workspace_write 不等于放权；节点可用 capability 收紧到 read_only
+                # 不在其中，因此默认给 workspace_write 不等于放权；
+                # 节点可用 capability 收紧到 read_only
                 "capability": node.get("capability") or "workspace_write",
                 "retry": {"max": 1, "backoff": 10.0},
                 "timeout": 300,
@@ -435,6 +441,29 @@ def _write_package(
     (draft / "tests/smoke.py").write_text(
         '"""冒烟由平台 run_smoke 执行；此文件用于包内自描述。"""\n', encoding="utf-8"
     )
+
+
+def _materialize_page(
+    draft: Path, *, workflow_id: str, title: str
+) -> list[str]:
+    """第 ④ 步的页面半程：生成 Schema → 校验 → 编译 → 冒烟。
+
+    失败抛 `GenerationError('page')`，由生成循环把缺失组件回喂模型重出清单；
+    页面是确定性推导，正常不会进重试分支，但契约变更（比如组件被删）要能定位。
+    """
+    page = generate_page(workflow_id=workflow_id, title=title)
+    try:
+        clean = page_schema.load(page)
+    except page_schema.PageSchemaError as exc:
+        raise GenerationError("page", [issue.as_dict() for issue in exc.issues]) from exc
+    (draft / "ui" / "pages" / "main.json").write_text(
+        json.dumps(clean, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    page_compiler.write_page(clean, draft / "ui" / "compiled" / "main")
+    issues = smoke_page(draft, "main")
+    if issues:
+        raise GenerationError("page", issues)
+    return ["ui/compiled/main/index.html", "ui/compiled/main/app.js", "ui/compiled/main/theme.css"]
 
 
 def _artifact(session_id: str, step: int, name: str, status: str, payload: dict[str, Any]) -> None:
@@ -516,7 +545,15 @@ async def generate(
                 )
 
                 (draft / "graph.py").write_text(codegen.generate_graph(parsed), encoding="utf-8")
-                done(4, "graph", {"files": ["graph.py", "ui/pages/main.json"]}, attempt=attempt)
+                page_files = _materialize_page(
+                    draft, workflow_id=workflow_id, title=f"{session['user_id']} 的工作流"
+                )
+                done(
+                    4,
+                    "graph",
+                    {"files": ["graph.py", "ui/pages/main.json", *page_files]},
+                    attempt=attempt,
+                )
 
                 issues = static_check.check_file(draft / "graph.py", parsed)
                 if issues:
@@ -670,7 +707,15 @@ async def prepare(
                 )
 
                 (target / "graph.py").write_text(codegen.generate_graph(parsed), encoding="utf-8")
-                done(4, "graph", {"files": ["graph.py", "ui/pages/main.json"]}, attempt=attempt)
+                page_files = _materialize_page(
+                    target, workflow_id=workflow_id, title=f"{session['user_id']} 的工作流"
+                )
+                done(
+                    4,
+                    "graph",
+                    {"files": ["graph.py", "ui/pages/main.json", *page_files]},
+                    attempt=attempt,
+                )
 
                 problems = static_check.check_file(target / "graph.py", parsed)
                 if problems:

@@ -110,7 +110,13 @@ async def test_generation_runs_seven_steps_and_publishes(isolated_dirs: Path) ->
         assert (package.root / node["prompt"]).exists()
         assert (package.root / node["system"]).exists()
     assert (package.root / "graph.py").exists()
-    assert (package.root / "ui/pages/main.json").exists()
+
+    # 第 ④ 步必须产出真 Schema（不是节点 id 占位）并编译成静态页
+    page = json.loads((package.root / "ui/pages/main.json").read_text(encoding="utf-8"))
+    assert page["page_schema_version"] == 1
+    assert {"table", "detail"} <= {block["type"] for block in page["blocks"]}
+    for name in ("index.html", "app.js", "theme.css"):
+        assert (package.root / "ui/compiled/main" / name).exists()
 
     # 七步都落了 artifact，前端可按步展示
     artifacts = fetch_all(
@@ -120,6 +126,9 @@ async def test_generation_runs_seven_steps_and_publishes(isolated_dirs: Path) ->
     )
     assert [item["payload"]["step"] for item in artifacts] == [1, 2, 3, 4, 5, 6, 7]
     assert all(item["payload"]["status"] == "ok" for item in artifacts)
+    # 第 ④ 步的 artifact 要说明页面也一起产出了，前端不必再猜
+    step4 = next(item["payload"] for item in artifacts if item["payload"]["step"] == 4)
+    assert "ui/compiled/main/index.html" in step4["files"]
 
     # 版本行是 published，会话回填了 workflow_id
     version = fetch_one(

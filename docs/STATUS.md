@@ -45,9 +45,10 @@
 | M4a | W43 托管与沙箱 | ✅ | `/p/{wf}/{v}/{page}` 壳（`sandbox="allow-scripts"` 无 `allow-same-origin`）+ 静态资产白名单 + 5 分钟 token；发布期 `pages` 阶段编译，坏 Schema 阻断发布；`test_hosting.py` 5 条 + `test_page_build.py` 3 条 |
 | M4a | W44 数据源 | ✅ | 5 个只读数据源全部落地：`run.list/run.get/run.events` 强制租户过滤，`artifact.read` 只读包内 `artifacts/`（拒绝目录穿越），`mcp.read` 走 `mcp.call_readonly`（写工具直接 400）；`test_hosting.py` 覆盖越权与穿越 |
 | M4a | W45 动作 | 🟡 | `/api/page/.../action`：`run.cancel/run.retry/run.trigger` 可用且越权落 `operator_actions(result='denied')`；`node.invoke` 因执行器没有单节点载体，明确返回 400（未假装成功） |
+| M4a | W47 生成接入七步 | ✅ | 第 ④ 步由 `pages/generate.py` 产出真 Schema（筛选+表格+详情+事件）→ 校验 → 编译 → 页面冒烟；缺渲染器时点名组件（如 `chart`）并以 `stage=page/issues=E_PAGE_SMOKE` 阻断；`test_page_generate.py` 4 条 + 生成链断言 |
 | M4a | W46 编辑器 v1 | ✅ | `/planner/{sid}/pages/{page}` 树 + 属性面板（加列/换组件/挂动作/上下移/复制/删除/加块）+ 草稿态即时预览；改完即校验，非法不写盘；只写 `ui/pages/*.json` 与 `ui/compiled/`，`manifest.json`/`graph.py` 字节不变（`test_page_editor.py` 7 条 + `test_page_editor_web.py` 3 条） |
 
-**M4a 阶段实测（2026-11-19）**：全量 206 passed；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get`/`run.cancel` 均 404 并留审计；编译产物按 `/{数据源名}` 取数，服务端只认 Schema 声明过的键。
+**M4a 阶段实测（2026-11-19）**：全量 210 passed；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get`/`run.cancel` 均 404 并留审计；编译产物按 `/{数据源名}` 取数，服务端只认 Schema 声明过的键。
 **未做（不算 ✅ 的部分）**：真实对象存储与多副本跨机接管尚未实测——`AO_PACKAGE_BACKEND=s3` 只在测试替身上验证，上云前需在真实 bucket 复跑一次。
 
 ## P1 执行内核
