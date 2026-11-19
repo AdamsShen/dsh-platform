@@ -30,6 +30,14 @@
 
 **M2 实测（2026-11-19）**：`tests/e2e/test_ops_api.py` 8 条通过；越权尝试落 `result='denied'`；全量 157 passed。
 
+| 里程碑 | 工作项 | 状态 | 验收（可复跑） |
+|---|---|---|---|
+| M3 | W30 用户维度费用 | ✅ | `usage.record(user_id=)` + `usage.summary_by_user()` + `migrations/014_usage_user_backfill.sql`；`tests/integration/test_usage_user.py` 2 条 |
+| M3 | W31 对象存储 | ✅ | `AO_PACKAGE_BACKEND=s3`：发布上传、`resolve_ref` 按 `s3://` 下载并缓存；`tests/integration/test_package_s3.py` 3 条 |
+
+**M3 实测（2026-11-19）**：A/B 两个主体费用可分开查且合计等于总额；s3 引用二次解析命中缓存不访问对象存储；`s3` 模式缺 bucket 在发布期 `PackageError`；全量 162 passed。
+**未做（不算 ✅ 的部分）**：真实对象存储与多副本跨机接管尚未实测——`AO_PACKAGE_BACKEND=s3` 只在测试替身上验证，上云前需在真实 bucket 复跑一次。
+
 ## P1 执行内核
 
 | 任务 | 状态 | 说明 |
@@ -144,13 +152,13 @@ P2 功能面已交付 15 项（当前基线 `uv run pytest -q` → 136 passed, 1
 | 7 | 生成与执行都在沙箱 | 🟡 | 执行在 DSH 沙箱；`graph.py` 仍 `importlib.exec_module` 在主进程 | P1-T13 |
 | 8 | 工作流复用、可改提示词/MCP/Skill | 🟡 | 包可复用；`parent_id` 只建表，无 clone API | P2-T10 |
 | 9 | 定时触发**按用户扇出** | ✅ | 2026-11-19 P5-T03~T05：`_spawn_batch` 一时刻展开 N 个 run，`subject.user_id` 与 `window` 带主体；重叠按主体判定；超限/超预算整批拒绝（`tests/e2e/test_fanout.py`） | P5-T03~T05 已完成 |
-| 10 | 云上部署 | 🟡 | 单机可跑；包只落本地目录，跨机解析不了 | P5-T07 |
-| 11 | 总/工作流/用户三层费用 | 🟡 | `llm_usage.user_id` 列与索引已随 012 落库，但 `usage.record` 尚未写入该列 | P5-T06 |
+| 10 | 云上部署 | 🟡 | 包已支持 `s3://` 后端（发布上传/运行期下载缓存），但**真实 bucket 与多副本未实测**，部署动作未做 | P5-T07 代码完成，上云待验证 |
+| 11 | 总/工作流/用户三层费用 | ✅ | 2026-11-19 P5-T06：`usage.record(user_id)` + `summary_by_user()` + 存量回填（`migrations/014`），合计与 `SUM(cost)` 一致 | P5-T06 已完成 |
 | 12 | 人工停止/重试/审计 | ✅ | 2026-11-19 M2：`POST /api/runs/{id}/cancel`、`POST /api/runs/{id}/retry`（`state.requeue`，epoch+1）、`GET /api/audit`（`operator_actions` + `run_events`），越权落 `result='denied'` | M2 已完成 |
 | 13 | 沙箱权限与提示词边界 | 🟡 | 输入中和 ✅（`input_guard.py`）；`egress` / `allowlist` / 凭据代理全仓零命中；MCP 只读契约无 | P1-T16 / T17 |
 | 14 | 挂了自动接管 | 🟡 | 租约 + fencing + 同机 resume 有；跨机重放依赖对象存储 | P5-T07 + P1-T10 |
 
-**统计（2026-11-19 M2 后）：✅ 6 条（#2 系统词、#3 节点级绑定、#4 Jinja2、#6 主体目录、#9 扇出、#12 停止/重试/审计）、🟡 7 条、❌ 1 条（#1 前端）。**
+**统计（2026-11-19 M3 后）：✅ 7 条（#2 系统词、#3 节点级绑定、#4 Jinja2、#6 主体目录、#9 扇出、#11 用户维度费用、#12 停止/重试/审计）、🟡 6 条、❌ 1 条（#1 前端）。**
 
 **结论：改计划，不重新制定。** 判据是地基是否还有效——14 条需求本身没变（设计 §0 就是这 14 行），租约队列 / fencing / 状态机 / 网关记账（真实 LiteLLM 14/14）/ 包冻结发布 / 规划七步均已实测在跑，重写等于把已验证的 12 人日再赌一次；3 条 ❌ 中有 2 条（前端、扇出）规格已存在，只是没排期。真正的问题是三处记录失真：沙箱组被一行 ✅ 打包、P2 编号撞车、P2 派生从未记录。
 

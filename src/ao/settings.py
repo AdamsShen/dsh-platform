@@ -58,6 +58,13 @@ class Settings:
     db_url: str = "postgresql://ao:ao@127.0.0.1:55433/ao"
     secret: str = "ao-dev-secret"
     packages_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "packages")
+    # --- 包存储（P5-T07）---
+    # local：只有本地内容寻址目录；s3：发布时上传，运行时按 s3:// 引用下载到本地缓存
+    package_backend: str = "local"
+    package_s3_bucket: str = ""
+    package_s3_prefix: str = ""
+    # 兼容 MinIO/OSS 等 S3 网关；留空走 AWS 默认 endpoint
+    package_s3_endpoint: str = ""
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / ".ao")
     default_tenant: str = "default"
 
@@ -133,6 +140,10 @@ class Settings:
             db_url=os.environ.get("AO_DB_URL", cls.db_url),
             secret=os.environ.get("AO_SECRET", "ao-dev-secret"),
             packages_dir=Path(os.environ.get("AO_PACKAGES_DIR", str(PROJECT_ROOT / "packages"))),
+            package_backend=os.environ.get("AO_PACKAGE_BACKEND", "local"),
+            package_s3_bucket=os.environ.get("AO_PACKAGE_S3_BUCKET", ""),
+            package_s3_prefix=os.environ.get("AO_PACKAGE_S3_PREFIX", ""),
+            package_s3_endpoint=os.environ.get("AO_PACKAGE_S3_ENDPOINT", ""),
             data_dir=Path(os.environ.get("AO_DATA_DIR", str(PROJECT_ROOT / ".ao"))),
             default_tenant=os.environ.get("AO_DEFAULT_TENANT", "default"),
             mock=_flag("AO_MOCK", True),

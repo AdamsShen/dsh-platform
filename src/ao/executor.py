@@ -481,6 +481,7 @@ class RunRuntime:
                     node_id=ctx.node_id,
                     attempt=ctx.attempt,
                     usage=reply.usage,
+                    user_id=self.user_id,
                 )
                 self.node_cost += cost
                 self.spent_usd = usage.refresh_run_spend(conn, self.run_id)
