@@ -3,8 +3,13 @@
 按 `auto-orchestration-platform/docs/superpowers/specs/2026-11-13-harness-orchestration-platform-design.md`
 与同目录 `docs/superpowers/plans/2026-11-13-*.md` 的分步方案实现。
 
-当前阶段：**P1 执行内核（M0/M1/M5）主体完成**，P2 工作流包开始落地。实现状态见
+当前阶段：**P1 执行内核 + P2 工作流包 + P4 页面生成器（M4a/M4b）已落地**。实现状态见
 `docs/STATUS.md`。
+
+页面生成器一句话概述：页面真值是一份受控 Page Schema（`ui/pages/*.json`），
+编译成 `ui/compiled/<page>/{index.html,app.js,theme.css}` 静态产物并随包冻结，
+按 `workflow@version` 托管在 `/p/{workflow}/{version}/{page}`；编辑器与分享链接都
+只改/只读 Schema，产物不可手改。
 
 ## 快速开始
 
@@ -19,6 +24,11 @@ uv run pytest -q
 make resources                          # 注册示例 MCP / Skill（页面绑定面板用）
 make run                                # 创作面 http://127.0.0.1:8000
 ```
+
+`run_example.py` 最后会打印示例看板地址
+`http://127.0.0.1:8000/p/daily_schedule/1/main`（先 `make run` 起服务）：
+那是 `examples/daily_schedule/ui/pages/main.json` 编译出的真页面，数据来自
+`/api/page/...` 五个只读数据源。
 
 真实模型（需要 `deepseek-harness-sdk` 与 `DEEPSEEK_API_KEY`）：
 

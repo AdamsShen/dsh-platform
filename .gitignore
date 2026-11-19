@@ -18,6 +18,9 @@ dist/
 coverage.xml
 htmlcov/
 
+# --- 示例包的页面编译产物（真值是 ui/pages/*.json，编译在发布期重跑）---
+examples/*/ui/compiled/
+
 # --- 本地运行时数据（草稿、包仓库、上传物、日志、sqlite）---
 .ao/
 uploads/

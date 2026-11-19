@@ -15,6 +15,7 @@ from ao.db import close_pool, fetch_all, fetch_one, tx
 from ao.executor import execute
 from ao.migrate import migrate
 from ao.package import freeze_package, load_package
+from ao.pages.build import compile_all_pages
 from ao.runs import create_run, ensure_workflow, publish_version
 from ao.settings import PROJECT_ROOT, settings
 
@@ -31,6 +32,10 @@ def seed_tenant(tenant_id: str = "default") -> None:
 
 def publish_example(name: str = "daily_schedule") -> tuple[str, int, str]:
     root = EXAMPLES / name
+    # 页面编译必须在 freeze 之前：产物要进包 hash，否则"跑的不是发布的"
+    pages = compile_all_pages(root)
+    if pages["issues"]:
+        raise SystemExit(f"页面编译失败: {pages['issues']}")
     manifest_hash, _ = freeze_package(root)
     package = load_package(root)
     manifest = package.manifest
@@ -85,6 +90,12 @@ async def main() -> int:
     )
     for event in events:
         print("event:", event["type"], event["node_id"] or "", event["payload"])
+
+    # 最后一步：打开页面（M4a 门禁）。先起服务再点链接，脚本本身不拉起 web 进程
+    print(
+        "page: http://127.0.0.1:8000"
+        f"/p/{workflow_id}/{version}/main  （先 `make run` 起 web 服务）"
+    )
 
     close_pool()
     return 0 if status == "succeeded" else 1

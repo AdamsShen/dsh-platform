@@ -89,7 +89,9 @@
     }
   ],
   "ui": {
-    "pages": []
+    "pages": [
+      "ui/pages/main.json"
+    ]
   },
-  "manifest_hash": "84ec53dcdf9b33c13b9d553ea33bd1b067e32a4f5e68ccc7ed36220bb105da3a"
+  "manifest_hash": "0d0f7d32d9251cbd471c96dc804b1e5364461e2550a9b38b91a081758a6c3762"
 }

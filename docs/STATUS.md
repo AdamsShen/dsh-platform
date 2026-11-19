@@ -50,7 +50,7 @@
 | M4a | W47 生成接入七步 | ✅ | 第 ④ 步由 `pages/generate.py` 产出真 Schema（筛选+表格+详情+事件）→ 校验 → 编译 → 页面冒烟；缺渲染器时点名组件（如 `chart`）并以 `stage=page/issues=E_PAGE_SMOKE` 阻断；`test_page_generate.py` 4 条 + 生成链断言 |
 | M4a | W46 编辑器 v1 | ✅ | `/planner/{sid}/pages/{page}` 树 + 属性面板（加列/换组件/挂动作/上下移/复制/删除/加块）+ 草稿态即时预览；改完即校验，非法不写盘；只写 `ui/pages/*.json` 与 `ui/compiled/`，`manifest.json`/`graph.py` 字节不变（`test_page_editor.py` 7 条 + `test_page_editor_web.py` 3 条） |
 
-**M4a 阶段实测（2026-11-19）**：全量 226 passed；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get`/`run.cancel` 均 404 并留审计；编译产物按 `/{数据源名}` 取数，服务端只认 Schema 声明过的键。
+**M4a/M4b 阶段实测（2026-11-19）**：全量 226 passed；`make demo` 末尾打印 `http://127.0.0.1:8000/p/daily_schedule/1/main`（示例看板由 `examples/daily_schedule/ui/pages/main.json` 编译）；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get`/`run.cancel` 均 404 并留审计；编译产物按 `/{数据源名}` 取数，服务端只认 Schema 声明过的键。
 **未做（不算 ✅ 的部分）**：真实对象存储与多副本跨机接管尚未实测——`AO_PACKAGE_BACKEND=s3` 只在测试替身上验证，上云前需在真实 bucket 复跑一次。
 
 ## P1 执行内核
@@ -118,7 +118,7 @@ P2 功能面已交付 15 项（当前基线 `uv run pytest -q` → 136 passed, 1
 | 3 | **manifest 只落"主要字段"** | 现有 `id` / `version` / `name` / `tenant` / `limits` / `vars` / `nodes` / `edges` / `triggers` / `bindings`，`Node` 有 `capability` / `retry` | 原设计中有字段未落，读外部生成的包可能静默丢信息 | 需要兼容非平台生成的包时 |
 | 4 | **真实模型无自动化回归** | `tests/real/test_dsh_real.py` 默认 deselected（即全量输出里的 `1 deselected`）；P2-T12 / P2-T15 标注的"真实 DSH 跑通""真实 HTTP 验证"均为人工一次性验证 | CI 全绿 ≠ 真实链路通。换模型版本、改 prompt、改 cron 解析都可能静默破，e2e 用的 `mock_model` 覆盖不到 | 每次改提示词 / 换模型 / 动 `_dsh_runtime` 后人工复跑 |
 | 5 | **P2 编号缺口无记录** | ✅ 已关闭（2026-11-19）：T01 / T08 / T09 核实为"做了未登记"，已补登为 ✅；T10 核实为**真未实现**，已在主表标 ❌ 并排入计划 | 原本无法判断是取消、合并还是遗漏，现已区分清楚 | 已处理 |
-| 6 | **14 条需求中 2 条不满足**（#1 前端、#9 扇出） | 见下方「需求覆盖总表」。#3 节点级绑定与 #2 系统词可编辑已于 2026-11-19 由 P6 关闭（`bindings_for_node()` + 运行期按节点解析 + 节点卡片）；剩余两条不是补丁能解决：前端是独立子系统（P4 规格已写、未开工）、扇出需要触发器加一层展开 | 日程表主场景（每用户一份）不成立；工作流产物只能是数据不能是界面 | P5 扇出：立即；前端：等 #1 形态拍板 |
+| 6 | ~~14 条需求中 2 条不满足（#1 前端、#9 扇出）~~ ✅ 已关闭（2026-11-19） | #1 由 P4 关闭（Schema + 编译器 + 托管 + 编辑器 + 分享），#9 由 P5 关闭（`_spawn_batch` 按用户扇出）；当前只剩 🟡 的语义差异项（#5 #7 #8 #10 #13 #14） | — | 已处理 |
 
 另有两处旧描述与实际不符，以此处为准（表格内容保留作历史）：
 
@@ -158,7 +158,7 @@ P2 功能面已交付 15 项（当前基线 `uv run pytest -q` → 136 passed, 1
 
 | # | 需求 | 现状 | 依据（代码/文档） | 归属 |
 |---|---|---|---|---|
-| 1 | 对话页 + 传文档 + 记忆 + 出 LangGraph + **前端** | 🟡→❌ | 前三项齐（`src/ao/planner/`）；`ui/pages/main.json` 只写节点 ID 列表（`planner/orchestrator.py:345`），无 HTML/Schema/渲染管线 | P4（规格 2026-11-19 修订：产物改为**自动生成的前端代码**） |
+| 1 | 对话页 + 传文档 + 记忆 + 出 LangGraph + **前端** | ✅ | 2026-11-19 P4：受控 Page Schema（`src/ao/pages/schema.py`）→ 编译器（确定性字节一致）→ `/p/{wf}/{v}/{page}` 托管（iframe `allow-scripts` 无 `allow-same-origin`）→ 编辑器 v1 → 免登录分享（scope 进 SQL 谓词）→ 七步第 ④ 步自动产页面；`node.invoke` 因执行器无单节点载体仍 400（`run.trigger/cancel/retry` 可用） | P4 M4a/M4b 已完成 |
 | 2 | 节点提示词 + 系统词 UI 可绑 | ✅ | 2026-11-19 P6-T05：`EDITABLE_FIELDS` 含 `system`，节点卡片可编辑并落 `prompts/<node>.system.md`，清空回默认 | P6 已完成 |
 | 3 | **节点级**绑定 MCP/Skill | ✅ | 2026-11-19 P6-T01~T04：`bindings_for_node()`（MCP 同名覆盖 / Skill 并集）+ `RunRuntime._tools_for()` 按节点解析并缓存；`call_agent` 的 `mcp/skills` 作为 turn 级覆盖真正生效；发布期 issue 带 `node` | P6 已完成 |
 | 4 | 提示词支持 Jinja2 | ✅ | `SandboxedEnvironment + StrictUndefined`（`vars.py:23`） | 已完成 |
@@ -173,7 +173,7 @@ P2 功能面已交付 15 项（当前基线 `uv run pytest -q` → 136 passed, 1
 | 13 | 沙箱权限与提示词边界 | 🟡 | 输入中和 ✅（`input_guard.py`）；`egress` / `allowlist` / 凭据代理全仓零命中；MCP 只读契约无 | P1-T16 / T17 |
 | 14 | 挂了自动接管 | 🟡 | 租约 + fencing + 同机 resume 有；跨机重放依赖对象存储 | P5-T07 + P1-T10 |
 
-**统计（2026-11-19 M3 后）：✅ 7 条（#2 系统词、#3 节点级绑定、#4 Jinja2、#6 主体目录、#9 扇出、#11 用户维度费用、#12 停止/重试/审计）、🟡 6 条、❌ 1 条（#1 前端）。**
+**统计（2026-11-19 P4 后）：✅ 8 条（#1 前端、#2 系统词、#3 节点级绑定、#4 Jinja2、#6 主体目录、#9 扇出、#11 用户维度费用、#12 停止/重试/审计）、🟡 5 条（#5 #7 #8 #10 #13 #14 中的部分项，见上表）、❌ 0 条。**
 
 **结论：改计划，不重新制定。** 判据是地基是否还有效——14 条需求本身没变（设计 §0 就是这 14 行），租约队列 / fencing / 状态机 / 网关记账（真实 LiteLLM 14/14）/ 包冻结发布 / 规划七步均已实测在跑，重写等于把已验证的 12 人日再赌一次；3 条 ❌ 中有 2 条（前端、扇出）规格已存在，只是没排期。真正的问题是三处记录失真：沙箱组被一行 ✅ 打包、P2 编号撞车、P2 派生从未记录。
 

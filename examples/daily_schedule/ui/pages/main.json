@@ -1,0 +1,102 @@
+{
+  "page_schema_version": 1,
+  "id": "main",
+  "title": "每日日程看板",
+  "layout": "stack",
+  "theme": {
+    "primary": "#2f6fed",
+    "background": "#f7f8fa"
+  },
+  "data": {
+    "runs": {
+      "source": "run.list",
+      "limit": 50
+    },
+    "run": {
+      "source": "run.get",
+      "params": {
+        "id": "$selection.id"
+      }
+    },
+    "events": {
+      "source": "run.events",
+      "params": {
+        "id": "$selection.id"
+      }
+    }
+  },
+  "blocks": [
+    {
+      "type": "filter",
+      "fields": [
+        {
+          "name": "status",
+          "label": "状态",
+          "kind": "select",
+          "options": [
+            {
+              "label": "全部",
+              "value": ""
+            },
+            {
+              "label": "运行中",
+              "value": "running"
+            },
+            {
+              "label": "成功",
+              "value": "succeeded"
+            },
+            {
+              "label": "失败",
+              "value": "failed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "运行记录",
+      "source": "runs",
+      "pageSize": 20,
+      "columns": [
+        {
+          "field": "id",
+          "label": "ID",
+          "format": "text"
+        },
+        {
+          "field": "status",
+          "label": "状态",
+          "format": "status"
+        },
+        {
+          "field": "created_at",
+          "label": "创建时间",
+          "format": "date"
+        },
+        {
+          "field": "spent_usd",
+          "label": "花费",
+          "format": "number"
+        }
+      ],
+      "onRowClick": {
+        "source": "run",
+        "param": "id"
+      }
+    },
+    {
+      "type": "detail",
+      "title": "运行详情",
+      "source": "run"
+    },
+    {
+      "type": "timeline",
+      "title": "事件流",
+      "source": "events",
+      "titleField": "type",
+      "timeField": "created_at"
+    }
+  ]
+}
