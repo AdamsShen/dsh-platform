@@ -17,6 +17,8 @@ class MCPError(RuntimeError):
 
 
 _TOOLS: dict[str, Callable[[dict[str, Any]], Any]] = {}
+#: 只读工具集合：页面侧 `mcp.read` 只允许调这些，避免"看板按钮顺手改数据"
+_READONLY: set[str] = set()
 
 _ROLES = {
     "u_001": {"persona": "安静的插画师，作息偏晚"},
@@ -62,18 +64,33 @@ def _busy(args: dict[str, Any]) -> dict[str, Any]:
     return dict(_BUSY[key])
 
 
-_TOOLS.update(
-    {
-        "clock.today": _today,
-        "roles.get": _role,
-        "mood.latest": _mood,
-        "calendar.busy": _busy,
-    }
-)
+def register(
+    server: str, tool: str, fn: Callable[[dict[str, Any]], Any], *, readonly: bool = False
+) -> None:
+    """登记一个工具；`readonly=True` 才允许被页面 `mcp.read` 调用。
+
+    默认 False（写操作）是有意的：新增工具忘了标只读时，页面调不动而不是能乱写。
+    """
+    name = f"{normalize(server)}.{tool}"
+    _TOOLS[name] = fn
+    if readonly:
+        _READONLY.add(name)
+    else:
+        _READONLY.discard(name)
 
 
-def register(server: str, tool: str, fn: Callable[[dict[str, Any]], Any]) -> None:
-    _TOOLS[f"{server}.{tool}"] = fn
+def is_readonly(server: str, tool: str) -> bool:
+    return f"{normalize(server)}.{tool}" in _READONLY
+
+
+def call_readonly(server: str, tool: str, args: dict[str, Any]) -> Any:
+    """只读调用入口：非只读工具直接拒绝，不落到 `call`。"""
+    if not is_readonly(server, tool):
+        raise MCPError(f"非只读工具不允许从页面调用: {server}.{tool}")
+    return call(server, tool, args)
+
+
+
 
 
 def normalize(server: str) -> str:
@@ -97,3 +114,14 @@ def call(server: str, tool: str, args: dict[str, Any]) -> Any:
 def describe(server: str, tool: str, args: dict[str, Any]) -> str:
     rendered = ",".join(f"{k}={v}" for k, v in sorted((args or {}).items()))
     return f"mcp__{normalize(server)}__{tool}({rendered})"
+
+
+# 本地内置工具都是取数语义（今天/角色/情绪/日历），登记为只读；
+# 放在模块末尾是因为 register 依赖 normalize 的定义顺序。
+for _server, _tool, _fn in (
+    ("clock", "today", _today),
+    ("roles", "get", _role),
+    ("mood", "latest", _mood),
+    ("calendar", "busy", _busy),
+):
+    register(_server, _tool, _fn, readonly=True)

@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from ao import mcp
+from ao.db import fetch_all, fetch_one, tx
 from ao.package import freeze_package
 from ao.pages import compiler
 from ao.pages import hosting as page_hosting
@@ -51,9 +53,36 @@ def _schema() -> dict[str, Any]:
         "runs": {"source": "run.list", "limit": 20},
         "run": {"source": "run.get"},
         "events": {"source": "run.events"},
+        "artifact": {
+            "source": "artifact.read",
+            "params": {"id": "$selection.id", "name": "$selection.name"},
+        },
+        "role": {
+            "source": "mcp.read",
+            "params": {"server": "roles", "tool": "get", "id": "$selection.id"},
+        },
     }
     # 看板里的 sourced 组件引用的是 runs/run/events，保持名字一致即可
     return schema
+
+
+def _token(
+    workflow_id: str, *, page_id: str = "main", tenant_id: str = "default"
+) -> str:
+    return page_hosting.issue_token(
+        workflow_id=workflow_id,
+        version=1,
+        page_id=page_id,
+        user_id="u_1",
+        tenant_id=tenant_id,
+    )
+
+
+def _runs(workflow_id: str) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in fetch_all("SELECT id FROM runs WHERE workflow_id = %s", (workflow_id,))
+    ]
 
 
 @pytest.fixture
@@ -200,6 +229,149 @@ def test_run_get_is_scoped_to_tenant(client: TestClient, hosted: tuple[str, str]
         ).status_code
         == 200
     )
+
+
+def test_named_data_route_matches_compiled_client(
+    client: TestClient, hosted: tuple[str, str]
+) -> None:
+    """编译产物用的是 `/{数据源名}` 路径，不是 `?source=`。"""
+    workflow_id, _ = hosted
+    resp = client.get(f"/api/page/{workflow_id}/1/main/runs?token={_token(workflow_id)}")
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == []
+
+
+def test_artifact_read_is_scoped_to_run_package(
+    client: TestClient, hosted: tuple[str, str]
+) -> None:
+    workflow_id, ref = hosted
+    artifacts = Path(ref) / "artifacts"
+    artifacts.mkdir(exist_ok=True)
+    (artifacts / "plan.json").write_text('{"steps": [1, 2]}', encoding="utf-8")
+    run_id, _ = create_run(
+        tenant_id="default",
+        workflow_id=workflow_id,
+        version=1,
+        package_ref=ref,
+        subject={"user_id": "u_1"},
+        window="host-art",
+    )
+    token = _token(workflow_id)
+
+    ok = client.get(
+        f"/api/page/{workflow_id}/1/main/artifact?token={token}"
+        f"&id={run_id}&name=plan.json"
+    )
+    assert ok.status_code == 200
+    assert ok.json()["rows"][0]["json"] == {"steps": [1, 2]}
+
+    # 目录穿越与不存在的产物都按 404，不给"文件存在但无权"的信号
+    escaped = client.get(
+        f"/api/page/{workflow_id}/1/main/artifact?token={token}"
+        f"&id={run_id}&name=../manifest.json"
+    )
+    assert escaped.status_code == 404
+    assert (
+        client.get(
+            f"/api/page/{workflow_id}/1/main/artifact?token={token}"
+            f"&id={run_id}&name=nope.json"
+        ).status_code
+        == 404
+    )
+
+
+def test_mcp_read_only_exposes_readonly_tools(
+    client: TestClient, hosted: tuple[str, str]
+) -> None:
+    workflow_id, _ = hosted
+    token = _token(workflow_id)
+    ok = client.get(
+        f"/api/page/{workflow_id}/1/main/role?token={token}&id=u_001"
+    )
+    assert ok.status_code == 200
+    assert "插画师" in ok.json()["rows"][0]["persona"]
+
+    # 写工具即使被注册也不允许从页面调
+    def _writer(args: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True}
+
+    mcp.register("roles", "update", _writer)
+    denied = client.get(
+        f"/api/page/{workflow_id}/1/main/role?token={token}"
+        "&server=roles&tool=update&id=u_001"
+    )
+    assert denied.status_code == 400
+    assert "非只读工具" in denied.json()["detail"]
+
+
+def test_action_cancel_retry_and_trigger(
+    client: TestClient, hosted: tuple[str, str]
+) -> None:
+    workflow_id, ref = hosted
+    token = _token(workflow_id)
+    queued, _ = create_run(
+        tenant_id="default",
+        workflow_id=workflow_id,
+        version=1,
+        package_ref=ref,
+        subject={"user_id": "u_1"},
+        window="act-1",
+    )
+    url = f"/api/page/{workflow_id}/1/main/action?token={token}"
+
+    cancelled = client.post(url, json={"action": "run.cancel", "run": queued})
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    with tx() as conn:
+        conn.execute("UPDATE runs SET status = 'failed' WHERE id = %s", (queued,))
+    retried = client.post(url, json={"action": "run.retry", "run": queued})
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "queued"
+
+    created = client.post(url, json={"action": "run.trigger", "payload": {"window": "w-act"}})
+    assert created.status_code == 200
+    assert created.json()["status"] == "created"
+    assert len(_runs(workflow_id)) == 2
+
+
+def test_action_rejects_cross_tenant_and_unimplemented_node_invoke(
+    client: TestClient, hosted: tuple[str, str]
+) -> None:
+    workflow_id, ref = hosted
+    run_id, _ = create_run(
+        tenant_id="default",
+        workflow_id=workflow_id,
+        version=1,
+        package_ref=ref,
+        subject={"user_id": "u_1"},
+        window="act-2",
+    )
+    foreign = _token(workflow_id, tenant_id="other-tenant")
+    denied = client.post(
+        f"/api/page/{workflow_id}/1/main/action?token={foreign}",
+        json={"action": "run.cancel", "run": run_id},
+    )
+    assert denied.status_code == 404
+    # 越权尝试必须留痕，否则答不了"有人试过但被挡了"
+    row = fetch_one(
+        "SELECT result, detail FROM operator_actions WHERE action = 'page.run.cancel'"
+        " ORDER BY created_at DESC LIMIT 1"
+    )
+    assert row is not None and row["result"] == "denied"
+
+    bad = client.post(
+        f"/api/page/{workflow_id}/1/main/action?token={_token(workflow_id)}",
+        json={"action": "node.invoke", "node": "draft"},
+    )
+    assert bad.status_code == 400
+    assert "尚未实现" in bad.json()["detail"]
+
+    unknown = client.post(
+        f"/api/page/{workflow_id}/1/main/action?token={_token(workflow_id)}",
+        json={"action": "run.delete"},
+    )
+    assert unknown.status_code == 400
 
 
 def test_token_rejects_tampered_payload(hosted: tuple[str, str]) -> None:

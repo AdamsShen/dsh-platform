@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ao import audit, resources
+from ao import runs as runs_store
 from ao import state as run_state
 from ao import triggers as trigger_store
 from ao import users as users_store
@@ -24,6 +25,7 @@ from ao.cron import timezone_of
 from ao.db import fetch_all, fetch_one
 from ao.pages import datasources as page_data
 from ao.pages import hosting as page_hosting
+from ao.pages.schema import ACTIONS as PAGE_ACTIONS
 from ao.planner import draft as draft_store
 from ao.planner import orchestrator
 from ao.planner import session as planner_session
@@ -538,11 +540,10 @@ def create_app() -> FastAPI:
             },
         )
 
-    @app.get("/api/page/{workflow_id}/{version}/{page_id}/data")
-    def page_data_endpoint(
+    def _page_context(
         request: Request, workflow_id: str, version: int, page_id: str
-    ) -> dict[str, Any]:
-        """页面数据：token 校验 + Schema 声明的数据源 + 租户强制过滤。"""
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """校验 token 并加载页面 Schema；token 与页面/版本任一不匹配都按 401。"""
         try:
             payload = page_hosting.verify_token(request.query_params.get("token", ""))
         except page_hosting.HostingError as exc:
@@ -553,33 +554,154 @@ def create_app() -> FastAPI:
             or payload.get("p") != page_id
         ):
             raise HTTPException(status_code=401, detail="token 与页面不匹配")
-
         try:
             root = page_hosting.package_root(workflow_id, version)
             schema = page_hosting.page_schema(root, page_id)
         except page_hosting.HostingError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return payload, schema
 
-        name = request.query_params.get("source") or ""
+    def _read_page_data(
+        payload: dict[str, Any], schema: dict[str, Any], name: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """按 Schema 声明的数据源名取数；声明里没有的键一律 400。"""
         declared = (schema.get("data") or {}).get(name)
         if not isinstance(declared, dict):
             raise HTTPException(status_code=400, detail=f"未声明的数据源: {name}")
+        # Schema 里的静态参数（如 mcp.read 的 server/tool）先垫底，查询串里的
+        # 运行期取值（$selection 等在前端解析）覆盖同名键
+        merged: dict[str, Any] = {
+            str(key): value
+            for key, value in (declared.get("params") or {}).items()
+            if not (isinstance(value, str) and value.startswith("$"))
+        }
+        merged.update(params)
+        try:
+            rows = page_data.dispatch(
+                declared["source"], tenant_id=str(payload.get("t") or ""), params=merged
+            )
+        except page_data.DataSourceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 单对象数据源查不到就是"不存在或无权访问"，不给 200 空 body 让前端误判
+        if not rows and declared["source"] in {"run.get", "run.events", "artifact.read"}:
+            raise HTTPException(status_code=404, detail="对象不存在或无权访问")
+        return {"ok": True, "rows": rows}
 
+    @app.get("/api/page/{workflow_id}/{version}/{page_id}/data")
+    def page_data_endpoint(
+        request: Request, workflow_id: str, version: int, page_id: str
+    ) -> dict[str, Any]:
+        """兼容入口：`?source=<数据源名>`。新客户端走 `/{name}` 路径。"""
+        payload, schema = _page_context(request, workflow_id, version, page_id)
+        name = request.query_params.get("source") or ""
         params = {
             key: value
             for key, value in request.query_params.items()
             if key not in {"token", "source"}
         }
+        return _read_page_data(payload, schema, name, params)
+
+    @app.get("/api/page/{workflow_id}/{version}/{page_id}/{name}")
+    def page_data_named(
+        request: Request, workflow_id: str, version: int, page_id: str, name: str
+    ) -> dict[str, Any]:
+        """编译产物实际使用的形态：数据源名直接作为路径段。"""
+        payload, schema = _page_context(request, workflow_id, version, page_id)
+        params = {
+            key: value
+            for key, value in request.query_params.items()
+            if key != "token"
+        }
+        return _read_page_data(payload, schema, name, params)
+
+    @app.post("/api/page/{workflow_id}/{version}/{page_id}/action")
+    async def page_action(
+        request: Request, workflow_id: str, version: int, page_id: str
+    ) -> dict[str, Any]:
+        """页面写动作：只认白名单里的 op，且 run 级动作必须落在同租户。
+
+        `node.invoke` 需要执行器支持"单节点调用"这个载体（目前没有），
+        先明确 400，避免前端以为按钮点了没反应。
+        """
+        payload, _ = _page_context(request, workflow_id, version, page_id)
         try:
-            rows = page_data.dispatch(
-                declared["source"], tenant_id=str(payload.get("t") or ""), params=params
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001 — 非法 JSON 统一 400
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+
+        op = body.get("action")
+        if op not in PAGE_ACTIONS:
+            raise HTTPException(status_code=400, detail=f"动作不在白名单: {op!r}")
+        tenant_id = str(payload.get("t") or "")
+        user_id = str(payload.get("u") or "")
+        actor = f"page:{user_id}"
+        scope = f"{workflow_id}@{version}:{page_id}"
+
+        if op == "node.invoke":
+            raise HTTPException(
+                status_code=400, detail="node.invoke 需要执行器的单节点载体，尚未实现"
             )
-        except page_data.DataSourceError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        # 单对象数据源查不到就是"不存在或无权访问"，不给 200 空 body 让前端误判
-        if not rows and declared["source"] in {"run.get", "run.events"}:
-            raise HTTPException(status_code=404, detail="对象不存在或无权访问")
-        return {"ok": True, "rows": rows}
+
+        run_id = str(body.get("run") or "")
+        row = None
+        if run_id:
+            row = fetch_one(
+                "SELECT id, status FROM runs WHERE id = %s AND tenant_id = %s",
+                (run_id, tenant_id),
+            )
+            if row is None:
+                audit.record(
+                    action=f"page.{op}",
+                    object_type="run",
+                    object_id=run_id,
+                    actor=actor,
+                    scope=scope,
+                    result="denied",
+                    detail="run 不存在或跨租户",
+                )
+                raise HTTPException(status_code=404, detail="对象不存在或无权访问")
+
+        if op in {"run.cancel", "run.retry"}:
+            if row is None:
+                raise HTTPException(status_code=400, detail=f"{op} 需要 run 参数")
+            if op == "run.cancel":
+                outcome = run_state.request_cancel(run_id, actor=actor)
+                ok = outcome in {"cancelled", "cancelling"}
+            else:
+                ok = run_state.requeue(run_id, actor=actor)
+                outcome = "queued" if ok else "not_retryable"
+        else:  # run.trigger
+            version_row = fetch_one(
+                "SELECT package_ref FROM workflow_versions"
+                " WHERE workflow_id = %s AND version = %s",
+                (workflow_id, version),
+            )
+            if version_row is None:
+                raise HTTPException(status_code=404, detail="版本不存在")
+            run_id, created = runs_store.create_run(
+                tenant_id=tenant_id,
+                workflow_id=workflow_id,
+                version=version,
+                package_ref=str(version_row["package_ref"]),
+                subject={"user_id": user_id, "payload": body.get("payload") or {}},
+                window=str((body.get("payload") or {}).get("window") or f"page-{page_id}"),
+                trigger_user_id=user_id,
+            )
+            outcome = "created" if created else "deduped"
+            ok = True
+
+        audit.record(
+            action=f"page.{op}",
+            object_type="run",
+            object_id=run_id or None,
+            actor=actor,
+            scope=scope,
+            result="ok" if ok else "failed",
+            detail=f"status={outcome}",
+        )
+        return {"ok": ok, "status": outcome, "run_id": run_id or None}
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

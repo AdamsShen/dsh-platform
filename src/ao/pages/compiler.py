@@ -50,8 +50,31 @@ _RUNTIME = r"""
 (function () {
   var PAGE = __PAGE__;
   var CTX = window.__AO_PAGE__ || {};
-  var apiBase = CTX.apiBase || "/api/page";
   var state = { data: {}, filters: {}, selection: null, error: "" };
+
+  // 页面是被宿主 iframe 嵌进来的，拿不到 cookie；token 只能走 URL 查询串，
+  // 且响应头已带 Referrer-Policy: no-referrer，不会随图片/外链泄出去。
+  var TOKEN = "";
+  try {
+    TOKEN = new URLSearchParams(location.search).get("token") || "";
+  } catch (err) {
+    TOKEN = "";
+  }
+
+  // apiBase 从自身路径反推：/p/<wf>/<ver>/<page>/index.html → /api/page/<wf>/<ver>/<page>
+  function apiRoot() {
+    if (CTX.apiBase) { return CTX.apiBase; }
+    var seg = location.pathname.split("/").filter(function (s) { return s !== ""; });
+    if (seg[0] === "p" && seg.length >= 5) {
+      return "/api/page/" + seg[1] + "/" + seg[2] + "/" + seg[3];
+    }
+    return "/api/page";
+  }
+
+  function withToken(query) {
+    if (TOKEN) { query.set("token", TOKEN); }
+    return query;
+  }
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -96,10 +119,11 @@ _RUNTIME = r"""
   function fetchSource(name) {
     var spec = (PAGE.data || {})[name];
     if (!spec) { return Promise.resolve(); }
-    var query = new URLSearchParams(resolveParams(spec.params));
+    // 请求的是"页面里声明的数据源名"，不是原始 source：服务端只认声明过的键
+    var query = withToken(new URLSearchParams(resolveParams(spec.params)));
     query.set("limit", String(spec.limit || 200));
-    var url = apiBase + "/" + encodeURIComponent(spec.source) + "?" + query.toString();
-    return fetch(url, { credentials: "omit" })
+    var url = apiRoot() + "/" + encodeURIComponent(name) + "?" + query.toString();
+    return fetch(url, { credentials: "omit", referrerPolicy: "no-referrer" })
       .then(function (resp) {
         if (!resp.ok) { throw new Error("数据源 " + spec.source + " 返回 " + resp.status); }
         return resp.json();
@@ -121,9 +145,11 @@ _RUNTIME = r"""
       run: action.run ? expr(action.run) : null,
       payload: payload || action.payload || {}
     };
-    fetch(apiBase + "/action", {
+    var actionQuery = withToken(new URLSearchParams());
+    fetch(apiRoot() + "/action?" + actionQuery.toString(), {
       method: "POST",
       credentials: "omit",
+      referrerPolicy: "no-referrer",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     })

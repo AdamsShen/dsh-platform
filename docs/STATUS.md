@@ -43,10 +43,10 @@
 | M4a | W41 Page Schema v1 | ✅ | `src/ao/pages/schema.py`：15 组件 / 5 数据源 / 4 动作白名单，六种 E_* 错误码，拒绝 `on*` 与可执行片段；`tests/unit/test_page_schema.py` 12 条 |
 | M4a | W42 编译器 | ✅ | `src/ao/pages/compiler.py`：`index.html`+`app.js`+`theme.css`，两次编译字节一致，产物无 `eval(`/内联 `on*=`/`innerHTML`；`test_page_compiler.py` 9 条 |
 | M4a | W43 托管与沙箱 | ✅ | `/p/{wf}/{v}/{page}` 壳（`sandbox="allow-scripts"` 无 `allow-same-origin`）+ 静态资产白名单 + 5 分钟 token；发布期 `pages` 阶段编译，坏 Schema 阻断发布；`test_hosting.py` 5 条 + `test_page_build.py` 3 条 |
-| M4a | W44 数据源 | 🟡 | `run.list/run.get/run.events` 已实现并强制租户过滤；`artifact.read` / `mcp.read` 明确返回未实现（不返回空糊过去） |
-| M4a | W45 动作 | ⬜ | 编译产物里的按钮会 POST `/api/page/.../action`，该端点尚未实现 |
+| M4a | W44 数据源 | ✅ | 5 个只读数据源全部落地：`run.list/run.get/run.events` 强制租户过滤，`artifact.read` 只读包内 `artifacts/`（拒绝目录穿越），`mcp.read` 走 `mcp.call_readonly`（写工具直接 400）；`test_hosting.py` 覆盖越权与穿越 |
+| M4a | W45 动作 | 🟡 | `/api/page/.../action`：`run.cancel/run.retry/run.trigger` 可用且越权落 `operator_actions(result='denied')`；`node.invoke` 因执行器没有单节点载体，明确返回 400（未假装成功） |
 
-**M4a 阶段实测（2026-11-19）**：全量 191 passed；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get` 返回 404。
+**M4a 阶段实测（2026-11-19）**：全量 196 passed；托管页 iframe 内无 cookie 通路（token 走 URL、响应 `Referrer-Policy: no-referrer`），跨租户 `run.get`/`run.cancel` 均 404 并留审计；编译产物按 `/{数据源名}` 取数，服务端只认 Schema 声明过的键。
 **未做（不算 ✅ 的部分）**：真实对象存储与多副本跨机接管尚未实测——`AO_PACKAGE_BACKEND=s3` 只在测试替身上验证，上云前需在真实 bucket 复跑一次。
 
 ## P1 执行内核
