@@ -16,11 +16,12 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from ao import resources
+from ao import audit, resources
+from ao import state as run_state
 from ao import triggers as trigger_store
 from ao import users as users_store
 from ao.cron import timezone_of
-from ao.db import fetch_all
+from ao.db import fetch_all, fetch_one
 from ao.planner import draft as draft_store
 from ao.planner import orchestrator
 from ao.planner import session as planner_session
@@ -388,6 +389,99 @@ def create_app() -> FastAPI:
                 "status": row["status"],
             },
         }
+
+    def _actor(request: Request) -> str:
+        """操作人：A 期没有登录，先用请求头；缺省 anonymous 便于审计区分。"""
+        return request.headers.get("X-User-Id") or "anonymous"
+
+    def _require_ops(request: Request, action: str, run_id: str | None = None) -> None:
+        """写操作鉴权：失败时先落 denied 审计再抛 401——越权尝试也必须可查。"""
+        if _ops_allowed(request):
+            return
+        audit.record(
+            action=action,
+            object_type="run",
+            object_id=run_id,
+            actor=_actor(request),
+            result="denied",
+            detail="运维令牌不正确或未配置",
+        )
+        raise HTTPException(status_code=401, detail="运维令牌不正确或未配置")
+
+    @app.post("/api/runs/{run_id}/cancel")
+    def cancel_run(request: Request, run_id: str) -> dict[str, Any]:
+        """人工停止：只置标志，节点边界生效；queued 的立即取消。"""
+        _require_ops(request, "run.cancel", run_id)
+        outcome = run_state.request_cancel(run_id, actor=_actor(request))
+        if outcome == "missing":
+            raise HTTPException(status_code=404, detail="run 不存在")
+        audit.record(
+            action="run.cancel",
+            object_type="run",
+            object_id=run_id,
+            actor=_actor(request),
+            detail=outcome,
+        )
+        return {"ok": True, "result": outcome}
+
+    @app.post("/api/runs/{run_id}/retry")
+    def retry_run(request: Request, run_id: str) -> dict[str, Any]:
+        """人工重试：failed/cancelled 回队列（epoch+1）；succeeded 需新建 run。"""
+        _require_ops(request, "run.retry", run_id)
+        if not run_state.requeue(run_id, actor=_actor(request)):
+            row = fetch_one("SELECT status FROM runs WHERE id = %s", (run_id,))
+            if row is None:
+                raise HTTPException(status_code=404, detail="run 不存在")
+            audit.record(
+                action="run.retry",
+                object_type="run",
+                object_id=run_id,
+                actor=_actor(request),
+                result="failed",
+                detail=f"当前状态不可重试: {row['status']}",
+            )
+            raise HTTPException(status_code=409, detail=f"当前状态不可重试: {row['status']}")
+        audit.record(
+            action="run.retry", object_type="run", object_id=run_id, actor=_actor(request)
+        )
+        return {"ok": True, "status": "queued"}
+
+    @app.get("/api/audit")
+    def read_audit(
+        request: Request,
+        actor: str | None = None,
+        object_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """审计查询：运维留痕（operator_actions）+ run 事件（run_events）两侧都能查。"""
+        _require_ops(request, "audit.read", object_id)
+        try:
+            since_at = _parse_instant(since) if since else None
+            until_at = _parse_instant(until) if until else None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        actions = audit.query(
+            actor=actor,
+            object_id=object_id,
+            since=since_at,
+            until=until_at,
+            limit=limit,
+        )
+        events: list[dict[str, Any]] = []
+        if object_id:
+            # 对象 id 就是 run id：把 run 事件一并带出来，省得再拼一次请求
+            events = [
+                dict(row)
+                for row in fetch_all(
+                    "SELECT seq, run_id, type, payload, actor, created_at FROM run_events"
+                    " WHERE run_id = %s ORDER BY created_at DESC LIMIT %s",
+                    (object_id, max(1, min(500, limit))),
+                )
+            ]
+        return {"ok": True, "actions": actions, "events": events}
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

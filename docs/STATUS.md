@@ -22,6 +22,14 @@
 
 **M1 实测（2026-11-19）**：10 主体展开耗时 0.05s、重复投递 0.02s；单主体卡住只跳过 1 个（`created=9 skipped=1`）；1200>limit 整批 0 run + `failed` 审计。
 
+| 里程碑 | 工作项 | 状态 | 验收（可复跑） |
+|---|---|---|---|
+| M2 | W20 停止入口 | ✅ | `POST /api/runs/{id}/cancel`：queued 立即 cancelled，running 只置 `cancel_requested` |
+| M2 | W21 重试入口 | ✅ | `POST /api/runs/{id}/retry` → `state.requeue()`，epoch+1；succeeded 返回 409 |
+| M2 | W22 审计查询 | ✅ | `migrations/013_operator_actions.sql` + `src/ao/audit.py` + `GET /api/audit`（含 run_events） |
+
+**M2 实测（2026-11-19）**：`tests/e2e/test_ops_api.py` 8 条通过；越权尝试落 `result='denied'`；全量 157 passed。
+
 ## P1 执行内核
 
 | 任务 | 状态 | 说明 |
@@ -138,11 +146,11 @@ P2 功能面已交付 15 项（当前基线 `uv run pytest -q` → 136 passed, 1
 | 9 | 定时触发**按用户扇出** | ✅ | 2026-11-19 P5-T03~T05：`_spawn_batch` 一时刻展开 N 个 run，`subject.user_id` 与 `window` 带主体；重叠按主体判定；超限/超预算整批拒绝（`tests/e2e/test_fanout.py`） | P5-T03~T05 已完成 |
 | 10 | 云上部署 | 🟡 | 单机可跑；包只落本地目录，跨机解析不了 | P5-T07 |
 | 11 | 总/工作流/用户三层费用 | 🟡 | `llm_usage.user_id` 列与索引已随 012 落库，但 `usage.record` 尚未写入该列 | P5-T06 |
-| 12 | 人工停止/重试/审计 | 🟡 | `state.request_cancel` / `state.resume` 有，13 个路由里无 `/stop` `/retry` | P3-T04 |
+| 12 | 人工停止/重试/审计 | ✅ | 2026-11-19 M2：`POST /api/runs/{id}/cancel`、`POST /api/runs/{id}/retry`（`state.requeue`，epoch+1）、`GET /api/audit`（`operator_actions` + `run_events`），越权落 `result='denied'` | M2 已完成 |
 | 13 | 沙箱权限与提示词边界 | 🟡 | 输入中和 ✅（`input_guard.py`）；`egress` / `allowlist` / 凭据代理全仓零命中；MCP 只读契约无 | P1-T16 / T17 |
 | 14 | 挂了自动接管 | 🟡 | 租约 + fencing + 同机 resume 有；跨机重放依赖对象存储 | P5-T07 + P1-T10 |
 
-**统计（2026-11-19 M1 后）：✅ 5 条（#2 系统词、#3 节点级绑定、#4 Jinja2、#6 主体目录、#9 扇出）、🟡 8 条、❌ 1 条（#1 前端）。**
+**统计（2026-11-19 M2 后）：✅ 6 条（#2 系统词、#3 节点级绑定、#4 Jinja2、#6 主体目录、#9 扇出、#12 停止/重试/审计）、🟡 7 条、❌ 1 条（#1 前端）。**
 
 **结论：改计划，不重新制定。** 判据是地基是否还有效——14 条需求本身没变（设计 §0 就是这 14 行），租约队列 / fencing / 状态机 / 网关记账（真实 LiteLLM 14/14）/ 包冻结发布 / 规划七步均已实测在跑，重写等于把已验证的 12 人日再赌一次；3 条 ❌ 中有 2 条（前端、扇出）规格已存在，只是没排期。真正的问题是三处记录失真：沙箱组被一行 ✅ 打包、P2 编号撞车、P2 派生从未记录。
 

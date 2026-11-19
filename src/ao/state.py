@@ -62,6 +62,26 @@ def resume(run_id: str, actor: str = "system") -> bool:
         return updated.rowcount > 0
 
 
+def requeue(run_id: str, actor: str = "system") -> bool:
+    """人工重试：把失败/已取消的 run 放回队列，epoch + 1。
+
+    只接受 `failed` / `cancelled`：`succeeded` 重跑会重复产生外部副作用，
+    需要的是新建 run 而不是复用同一个 id（复用会让审计与计费串在一起）。
+    节点与 checkpoint 保持原样，执行器从已完成节点之后继续。
+    """
+    with tx() as conn:
+        updated = conn.execute(
+            "UPDATE runs SET status='queued', epoch = epoch + 1, retry_at = NULL,"
+            " lease_owner = NULL, lease_until = NULL, error = NULL, ended_at = NULL,"
+            " cancel_requested = false"
+            " WHERE id = %s AND status IN ('failed','cancelled')",
+            (run_id,),
+        )
+        if updated.rowcount:
+            events.emit(conn, run_id, "run.requeued", actor=actor)
+        return updated.rowcount > 0
+
+
 def request_cancel(run_id: str, actor: str = "system") -> str:
     """停止只在节点边界生效；queued 的直接取消，running 的置标志等 worker 收尾。"""
     with tx() as conn:
