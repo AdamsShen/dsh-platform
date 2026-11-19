@@ -194,12 +194,17 @@ def fire_due(*, now: datetime | None = None, limit: int = 20) -> list[dict[str, 
     """
     now = now or datetime.now(UTC)
     results: list[dict[str, Any]] = _drain_pending(now=now, limit=limit)
+    # 同一轮里刚拉起缓冲的计划不再处理新槽位：拉起后立刻又按重叠缓冲一次等于自激，
+    # 且会让"一次扫描处理了几个槽位"的语义变得不可预测（`*/N` 定时器踩边界时尤其明显）
+    just_drained = {str(item.get("trigger_id")) for item in results if item.get("trigger_id")}
     due = fetch_all(
         "SELECT * FROM triggers WHERE enabled AND type = 'cron' AND next_fire_at <= %s"
         " ORDER BY next_fire_at LIMIT %s",
         (now, limit),
     )
     for row in due:
+        if str(row["id"]) in just_drained:
+            continue
         try:
             results.extend(_fire(dict(row), now))
         except Exception:  # noqa: BLE001
