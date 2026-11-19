@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}{{ schema.title }} · 页面编辑{% endblock %}
+{% block body %}
+<main class="stage">
+  <section class="card">
+    <h2>页面结构 <small>{{ schema.blocks | length }} 个块</small></h2>
+    {% if error %}<p class="error">改不动：{{ error }}</p>{% endif %}
+    <table class="grid">
+      <thead>
+        <tr><th>#</th><th>类型</th><th>标题</th><th>结构</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        {% for block in schema.blocks %}
+        <tr>
+          <td>{{ loop.index0 }}</td>
+          <td><code>{{ block.type }}</code></td>
+          <td>{{ block.title or block.label or "—" }}</td>
+          <td>
+            {% if block.type == "table" %}
+              {{ block.columns | length }} 列
+            {% elif block.action %}
+              动作 {{ block.action.action }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td class="ops">
+            {% for op, label in [("up", "↑"), ("down", "↓"), ("duplicate", "复制"), ("delete", "删除")] %}
+            <form method="post" action="/planner/{{ session_id }}/pages/{{ page_id }}/op">
+              <input type="hidden" name="op" value="{{ op }}">
+              <input type="hidden" name="target" value="{{ loop.index0 }}">
+              <button type="submit" class="mini {% if op == 'delete' %}danger{% endif %}">{{ label }}</button>
+            </form>
+            {% endfor %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">还没有块，先在下面加一个。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>属性面板</h2>
+
+    <form method="post" action="/planner/{{ session_id }}/pages/{{ page_id }}/op">
+      <h3>给表格加一列</h3>
+      <input type="hidden" name="op" value="add_column">
+      <label>目标表格
+        <select name="target">
+          {% for block in schema.blocks %}
+            {% if block.type == "table" %}
+            <option value="{{ loop.index0 }}">{{ loop.index0 }} · {{ block.title or "表格" }}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </label>
+      <label>字段名 <input type="text" name="field" placeholder="spent_usd" required></label>
+      <label>中文标签 <input type="text" name="label" placeholder="花费" required></label>
+      <label>格式
+        <select name="format">
+          {% for fmt in formats %}<option value="{{ fmt }}">{{ fmt }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="submit">加列</button>
+    </form>
+
+    <form method="post" action="/planner/{{ session_id }}/pages/{{ page_id }}/op">
+      <h3>换组件类型</h3>
+      <input type="hidden" name="op" value="change_type">
+      <label>目标块
+        <select name="target">
+          {% for block in schema.blocks %}
+          <option value="{{ loop.index0 }}">{{ loop.index0 }} · {{ block.type }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>换成
+        <select name="value">
+          {% for name in components %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="submit">换类型</button>
+    </form>
+
+    <form method="post" action="/planner/{{ session_id }}/pages/{{ page_id }}/op">
+      <h3>挂一个动作</h3>
+      <input type="hidden" name="op" value="add_action">
+      <label>目标块
+        <select name="target">
+          {% for block in schema.blocks %}
+          <option value="{{ loop.index0 }}">{{ loop.index0 }} · {{ block.type }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>动作
+        <select name="value">
+          {% for name in actions %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>节点（node.invoke 必填）<input type="text" name="node" placeholder="draft"></label>
+      <label class="inline"><input type="checkbox" name="confirm" value="1"> 点击前二次确认</label>
+      <button type="submit">挂动作</button>
+    </form>
+
+    <form method="post" action="/planner/{{ session_id }}/pages/{{ page_id }}/op">
+      <h3>新增块</h3>
+      <input type="hidden" name="op" value="add_block">
+      <input type="hidden" name="target" value="0">
+      <label>类型
+        <select name="value">
+          {% for name in components %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="submit">加块</button>
+    </form>
+  </section>
+
+  <section class="card preview">
+    <h2>即时预览 <small>草稿态，不取真实数据</small></h2>
+    <iframe title="预览"
+            src="/planner/{{ session_id }}/pages/{{ page_id }}/preview/index.html?preview=1"></iframe>
+  </section>
+
+  <p class="muted">
+    只改 <code>ui/pages/{{ page_id }}.json</code> 与 <code>ui/compiled/{{ page_id }}/</code>；
+    <code>manifest.json</code> / <code>graph.py</code> 不会被这次编辑碰到。
+  </p>
+</main>
+{% endblock %}

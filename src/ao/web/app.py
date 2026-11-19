@@ -11,6 +11,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -24,7 +25,9 @@ from ao import users as users_store
 from ao.cron import timezone_of
 from ao.db import fetch_all, fetch_one
 from ao.pages import datasources as page_data
+from ao.pages import editor as page_editor
 from ao.pages import hosting as page_hosting
+from ao.pages import schema as page_schema
 from ao.pages.schema import ACTIONS as PAGE_ACTIONS
 from ao.planner import draft as draft_store
 from ao.planner import orchestrator
@@ -270,6 +273,76 @@ def create_app() -> FastAPI:
         if settings.event_token:
             return request.headers.get("X-AO-Event-Token") == settings.event_token
         return settings.env == "dev"
+
+    def _draft_root(session_id: str) -> Path:
+        if not draft_store.exists(session_id):
+            raise HTTPException(status_code=404, detail=f"会话没有草稿: {session_id}")
+        return draft_store.draft_dir(session_id)
+
+    @app.get("/planner/{session_id}/pages/{page_id}", response_class=HTMLResponse)
+    def page_editor_view(
+        request: Request, session_id: str, page_id: str, error: str | None = None
+    ) -> HTMLResponse:
+        """页面编辑器：树 + 属性面板 + 即时预览。"""
+        root = _draft_root(session_id)
+        schema = page_editor.load_page(root, page_id)
+        return templates.TemplateResponse(
+            request,
+            "page_editor.html",
+            {
+                "session_id": session_id,
+                "page_id": page_id,
+                "schema": schema,
+                "error": error or "",
+                "components": sorted(page_schema.COMPONENTS),
+                "actions": sorted(page_schema.ACTIONS),
+                "formats": sorted(page_schema.COLUMN_FORMATS),
+            },
+        )
+
+    @app.post("/planner/{session_id}/pages/{page_id}/op")
+    async def page_editor_op(
+        request: Request, session_id: str, page_id: str
+    ) -> RedirectResponse:
+        """一次编辑 = 一次提交；失败回编辑器并把原因带回去，不写半成品。"""
+        root = _draft_root(session_id)
+        form = await request.form()
+        op = str(form.get("op") or "")
+        try:
+            target = int(str(form.get("target") or 0))
+        except ValueError:
+            target = 0
+        payload = {
+            key: str(form.get(key) or "") for key in ("field", "label", "format", "value", "node")
+        }
+        if form.get("confirm"):
+            payload["confirm"] = "1"
+        base = f"/planner/{session_id}/pages/{page_id}"
+        try:
+            schema = page_editor.load_page(root, page_id)
+            updated = page_editor.apply_op(schema, op, target, payload)
+            page_editor.save_page(root, page_id, updated)
+        except page_editor.EditorError as exc:
+            return RedirectResponse(f"{base}?error={quote(str(exc))}", status_code=303)
+        return RedirectResponse(base, status_code=303)
+
+    @app.get("/planner/{session_id}/pages/{page_id}/preview/{asset:path}")
+    def page_editor_preview(session_id: str, page_id: str, asset: str) -> FileResponse:
+        """预览静态产物：从草稿目录读，草稿未编译时 404（不现场编译）。"""
+        root = _draft_root(session_id)
+        try:
+            path = page_hosting.resolve_asset(root, page_id, asset)
+        except page_hosting.HostingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path,
+            headers={
+                "Content-Security-Policy": page_hosting.PAGE_CSP,
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
 
     @app.post("/api/workflows/{workflow_id}/events/{event_name}")
     async def receive_event(

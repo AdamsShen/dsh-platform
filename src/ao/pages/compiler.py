@@ -55,8 +55,12 @@ _RUNTIME = r"""
   // 页面是被宿主 iframe 嵌进来的，拿不到 cookie；token 只能走 URL 查询串，
   // 且响应头已带 Referrer-Policy: no-referrer，不会随图片/外链泄出去。
   var TOKEN = "";
+  // 编辑器预览跑在草稿目录、还没有发布版本，也没有 token：跳过取数只渲染骨架
+  var PREVIEW = "";
   try {
-    TOKEN = new URLSearchParams(location.search).get("token") || "";
+    var params = new URLSearchParams(location.search);
+    TOKEN = params.get("token") || "";
+    PREVIEW = params.get("preview") || "";
   } catch (err) {
     TOKEN = "";
   }
@@ -119,6 +123,10 @@ _RUNTIME = r"""
   function fetchSource(name) {
     var spec = (PAGE.data || {})[name];
     if (!spec) { return Promise.resolve(); }
+    if (PREVIEW) {
+      state.data[name] = [];
+      return Promise.resolve();
+    }
     // 请求的是"页面里声明的数据源名"，不是原始 source：服务端只认声明过的键
     var query = withToken(new URLSearchParams(resolveParams(spec.params)));
     query.set("limit", String(spec.limit || 200));
