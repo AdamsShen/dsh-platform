@@ -162,7 +162,15 @@ def shell_html(
         user_id=user_id,
         tenant_id=tenant_id,
     )
-    src = f"./{page_id}/index.html?token={token}"
+    return _frame_html(f"./{page_id}/index.html?token={token}", page_id)
+
+
+def share_shell_html(*, token: str, page_id: str) -> str:
+    """分享页壳：与登录态壳同样的沙箱策略，只是 src 走 `/s/{token}/`。"""
+    return _frame_html(f"/s/{token}/index.html", page_id)
+
+
+def _frame_html(src: str, page_id: str) -> str:
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>

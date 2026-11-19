@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ao import mcp
+from ao import mcp, share
 from ao.db import fetch_all, fetch_one
 
 MAX_ROWS = 200
@@ -35,13 +35,22 @@ class DataSourceError(RuntimeError):
     """数据源非法或对象越权；调用方统一映射 404/400。"""
 
 
-def run_list(*, tenant_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+def run_list(
+    *, tenant_id: str, params: dict[str, Any], scope: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """`run.list`：本租户的 run 列表，按创建时间倒序，最多 200 行。
 
     params 只认 `workflow_id` / `status`；其他键忽略而不是拼进 SQL。
+    `scope` 来自分享链接：编译成额外谓词，先于取数生效（不是取回再过滤）。
     """
     clauses = ["tenant_id = %s"]
     values: list[Any] = [tenant_id]
+    if scope is not None:
+        scope_clause, scope_values = share.scope_sql(
+            scope, default_workflow_id=str(params.get("workflow_id") or "")
+        )
+        clauses.append(scope_clause)
+        values.extend(scope_values)
     workflow_id = params.get("workflow_id")
     if isinstance(workflow_id, str) and workflow_id:
         clauses.append("workflow_id = %s")
@@ -135,10 +144,16 @@ def mcp_read(*, tenant_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"value": result}]
 
 
-def dispatch(source: str, *, tenant_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+def dispatch(
+    source: str,
+    *,
+    tenant_id: str,
+    params: dict[str, Any],
+    scope: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """按 Schema 声明的 `source` 分发；未声明的数据源明确报错而不是返回空。"""
     if source == "run.list":
-        return run_list(tenant_id=tenant_id, params=params)
+        return run_list(tenant_id=tenant_id, params=params, scope=scope)
     if source == "run.get":
         return run_get(tenant_id=tenant_id, params=params)
     if source == "run.events":

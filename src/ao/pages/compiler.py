@@ -72,6 +72,10 @@ _RUNTIME = r"""
     if (seg[0] === "p" && seg.length >= 5) {
       return "/api/page/" + seg[1] + "/" + seg[2] + "/" + seg[3];
     }
+    // 分享态：/s/<token>/index.html → /s/<token>
+    if (seg[0] === "s" && seg.length >= 3) {
+      return "/s/" + seg[1];
+    }
     return "/api/page";
   }
 

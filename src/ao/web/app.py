@@ -19,6 +19,7 @@ from fastapi.templating import Jinja2Templates
 
 from ao import audit, resources
 from ao import runs as runs_store
+from ao import share as share_store
 from ao import state as run_state
 from ao import triggers as trigger_store
 from ao import users as users_store
@@ -775,6 +776,122 @@ def create_app() -> FastAPI:
             detail=f"status={outcome}",
         )
         return {"ok": ok, "status": outcome, "run_id": run_id or None}
+
+    def _share(token: str) -> dict[str, Any]:
+        """解析分享 token；不可用统一 404，次数用尽 429（要能区分"过载"与"不存在"）。"""
+        try:
+            return share_store.resolve(token)
+        except share_store.ShareError as exc:
+            status = 429 if exc.code == "exhausted" else 404
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/s/{token}")
+    def share_shell(request: Request, token: str) -> HTMLResponse:
+        """分享页壳：不需要登录，iframe 沙箱与登录态一致。"""
+        share = _share(token)
+        try:
+            root = page_hosting.package_root(share["workflow_id"], int(share["version"]))
+            page_hosting.page_dir(root, share["page_id"])
+        except page_hosting.HostingError as exc:
+            share_store.touch(share, status=404)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        share_store.touch(share, status=200)
+        return HTMLResponse(
+            page_hosting.share_shell_html(token=token, page_id=str(share["page_id"])),
+            headers={
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/s/{token}/data/{name}")
+    def share_data(request: Request, token: str, name: str) -> dict[str, Any]:
+        """分享态取数：scope 进 SQL 谓词，单对象再核一次范围，越界按不存在。"""
+        share = _share(token)
+        try:
+            root = page_hosting.package_root(share["workflow_id"], int(share["version"]))
+            schema = page_hosting.page_schema(root, str(share["page_id"]))
+        except page_hosting.HostingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        declared = (schema.get("data") or {}).get(name)
+        if not isinstance(declared, dict):
+            share_store.touch(share, status=400)
+            raise HTTPException(status_code=400, detail=f"未声明的数据源: {name}")
+
+        scope = dict(share.get("scope") or {})
+        params = {
+            key: value for key, value in request.query_params.items() if key != "token"
+        }
+        params.setdefault("workflow_id", str(share["workflow_id"]))
+        params.update(
+            {
+                key: value
+                for key, value in (declared.get("params") or {}).items()
+                if not (isinstance(value, str) and value.startswith("$"))
+            }
+        )
+        try:
+            rows = page_data.dispatch(
+                declared["source"],
+                tenant_id=str(share["tenant_id"]),
+                params=params,
+                scope=scope,
+            )
+        except page_data.DataSourceError as exc:
+            share_store.touch(share, status=400)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if declared["source"] in {"run.get", "run.events", "artifact.read"}:
+            rows = [
+                row
+                for row in rows
+                if share_store.row_in_scope(
+                    scope, row, workflow_id=str(share["workflow_id"])
+                )
+            ]
+        if not rows and declared["source"] in {"run.get", "run.events", "artifact.read"}:
+            share_store.touch(share, status=404, in_scope=False)
+            raise HTTPException(status_code=404, detail="对象不存在或不在分享范围")
+        share_store.touch(share, status=200)
+        return {"ok": True, "rows": rows}
+
+    # 放在 /s/{token}/data/{name} 之后：catch-all 先声明会把 data 路径吃掉
+    @app.get("/s/{token}/{asset:path}")
+    def share_asset(token: str, asset: str) -> FileResponse:
+        share = _share(token)
+        try:
+            root = page_hosting.package_root(share["workflow_id"], int(share["version"]))
+            path = page_hosting.resolve_asset(root, share["page_id"], asset)
+        except page_hosting.HostingError as exc:
+            share_store.touch(share, status=404)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path,
+            headers={
+                "Content-Security-Policy": page_hosting.PAGE_CSP,
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": (
+                    "no-store" if asset == "index.html" else "public, max-age=86400"
+                ),
+            },
+        )
+
+    @app.post("/s/{token}/action")
+    def share_action(token: str) -> dict[str, Any]:
+        """分享态一律不许写：免登录链接不能成为改数据的入口。"""
+        share = _share(token)
+        share_store.touch(share, status=403)
+        audit.record(
+            action="share.action",
+            object_type="share",
+            object_id=str(share["id"]),
+            actor="share:anonymous",
+            scope="share",
+            result="denied",
+            detail="分享态不允许执行动作",
+        )
+        raise HTTPException(status_code=403, detail="分享页面为只读，不能执行动作")
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
