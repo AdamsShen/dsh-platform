@@ -27,7 +27,13 @@ resources:
 	uv run python scripts/seed_resources.py
 
 demo:
-	uv run python scripts/demo.py
+	uv run python scripts/run_example.py
+
+drill:
+	uv run python scripts/drill.py
+
+drill-fanout:
+	uv run python scripts/drill_fanout.py
 
 capacity:
-	uv run python scripts/capacity.py
+	uv run python scripts/capacity_report.py

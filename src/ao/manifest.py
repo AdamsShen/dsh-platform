@@ -16,6 +16,10 @@ OUTPUT_TYPES = {"str", "int", "float", "bool"}
 #: 单个节点最多绑定多少个 MCP / Skill：每 turn 都要按绑定建连，上限防"每个节点挂一堆"
 NODE_BINDING_LIMIT = 8
 _REF_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+#: 扇出模式（P5-T02）：none 保持"一次到点一个 run"；mcp_query 放 B 期，本期拒绝
+FANOUT_MODES = {"none", "tenant_active", "static_list"}
+FANOUT_LIMIT_MAX = 5000
 _WHEN_RE = re.compile(r"^\s*([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$")
 _OPS = {
     "==": lambda a, b: a == b,
@@ -167,6 +171,44 @@ class Manifest(BaseModel):
         return [b.ref for b in self.effective_bindings() if b.kind == "skill"]
 
 
+def _validate_fanout(trigger: Trigger) -> None:
+    """扇出配置的发布期校验（P5-T02）。
+
+    非法组合一律拒绝而不是静默降级：fanout 写错会让"每天给 100 个用户各生成一份"
+    退化成"只给 1 个用户生成"，业务侧当天无法感知。
+    """
+    raw = trigger.fanout or {}
+    if not isinstance(raw, dict):
+        raise ValueError("fanout 必须是对象")
+    mode = str(raw.get("mode") or "none")
+    if mode not in FANOUT_MODES:
+        raise ValueError(
+            f"fanout.mode 只支持 none/tenant_active/static_list: {mode!r}"
+            "（mcp_query 放 B 期，暂不支持）"
+        )
+    if mode != "none" and trigger.type == "manual":
+        raise ValueError("manual 触发器不支持扇出（没有可展开的触发时刻）")
+    limit = raw.get("limit", 1000)
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("fanout.limit 必须是整数")
+    if not 1 <= limit <= FANOUT_LIMIT_MAX:
+        raise ValueError(f"fanout.limit 必须在 1~{FANOUT_LIMIT_MAX} 之间")
+    budget = raw.get("budget_per_run", 0) or 0
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget < 0:
+        raise ValueError("fanout.budget_per_run 必须是非负数")
+    if mode == "static_list":
+        refs = raw.get("user_ids")
+        if not isinstance(refs, list) or not refs:
+            raise ValueError("fanout.mode=static_list 必须提供非空 user_ids")
+        cleaned = [str(ref).strip() for ref in refs]
+        if any(not ref for ref in cleaned):
+            raise ValueError("fanout.user_ids 不允许空字符串")
+        if len(cleaned) > limit:
+            raise ValueError(
+                f"fanout.user_ids 数量 {len(cleaned)} 超过 fanout.limit({limit})"
+            )
+
+
 def parse(data: dict[str, Any]) -> Manifest:
     try:
         manifest = Manifest.model_validate(data)
@@ -213,6 +255,8 @@ def validate_graph(manifest: Manifest) -> None:
                 )
         if trigger.type == "event" and not (trigger.event_name or "").strip():
             raise ValueError("event 触发器必须声明 event_name")
+        if trigger.fanout:
+            _validate_fanout(trigger)
 
     seen_bindings: set[tuple[str, str]] = set()
     for binding in manifest.bindings:

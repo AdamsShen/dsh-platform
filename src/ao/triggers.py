@@ -26,8 +26,10 @@ from psycopg.types.json import Jsonb
 
 from ao import runs as runs_store
 from ao import state as run_state
+from ao import users as users_store
 from ao.cron import next_fire, validate_cron
 from ao.db import fetch_all, fetch_one, tx
+from ao.settings import settings
 from ao.util import new_id, sha256_hex
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,9 @@ MAX_SKIP_STEPS = 2000
 #: 回填参数上限：窗口最多 30 天、一次最多补 20 次
 MAX_CATCHUP_WINDOW = 30 * 24 * 3600
 MAX_CATCHUP_LIMIT = 20
+
+#: 单次扇出上限（与迁移 012 的 CHECK 约束保持一致）
+MAX_FANOUT_LIMIT = 5000
 
 #: 支持的重叠策略（与迁移 009 的 CHECK 约束保持一致）
 OVERLAP_POLICIES = ("skip", "buffer_one", "cancel_other")
@@ -69,6 +74,7 @@ def project(
     planned: list[dict[str, Any]] = []
     for trigger in triggers or []:
         kind = str(_field(trigger, "type") or "")
+        fanout = _normalize_fanout(_field(trigger, "fanout"))
         if kind == "cron":
             cron = str(_field(trigger, "cron") or "").strip()
             if not cron:
@@ -96,6 +102,10 @@ def project(
                     ),
                     # 发布期已校验，这里再兜底一次：脏值一律回落 skip（不静默跳过重叠保护）
                     "overlap_policy": _policy(_field(trigger, "overlap_policy")),
+                    "fanout_mode": fanout["mode"],
+                    "fanout_spec": fanout["spec"],
+                    "fanout_limit": fanout["limit"],
+                    "budget_per_run": fanout["budget"],
                 }
             )
         elif kind == "event":
@@ -113,6 +123,10 @@ def project(
                     "window": 0,
                     "limit": 1,
                     "overlap_policy": "skip",
+                    "fanout_mode": fanout["mode"],
+                    "fanout_spec": fanout["spec"],
+                    "fanout_limit": fanout["limit"],
+                    "budget_per_run": fanout["budget"],
                 }
             )
 
@@ -127,8 +141,10 @@ def project(
             row = conn.execute(
                 "INSERT INTO triggers (id, workflow_id, version, tenant_id, owner_user_id,"
                 " type, cron, timezone, event_name, package_ref, enabled, next_fire_at,"
-                " catchup_window_seconds, catchup_limit, overlap_policy)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s,%s) RETURNING *",
+                " catchup_window_seconds, catchup_limit, overlap_policy,"
+                " fanout_mode, fanout_spec, fanout_limit, budget_per_run)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s)"
+                " RETURNING *",
                 (
                     new_id("trg"),
                     workflow_id,
@@ -144,6 +160,10 @@ def project(
                     item["window"],
                     item["limit"],
                     item["overlap_policy"],
+                    item["fanout_mode"],
+                    Jsonb(item["fanout_spec"]),
+                    item["fanout_limit"],
+                    item["budget_per_run"],
                 ),
             ).fetchone()
             rows.append(dict(row))
@@ -308,7 +328,7 @@ def _fire(row: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
 
     results: list[dict[str, Any]] = []
     for slot in slots:
-        outcome = _spawn(row, slot, now=now)
+        outcome = _dispatch(row, slot, now=now)
         results.append(outcome)
         if outcome["status"] != "consumed":
             # 已有一个 run 在跑，继续补只会全部 skip，直接结束本轮
@@ -475,12 +495,229 @@ def _spawn(
     }
 
 
-def _running_run(workflow_id: str) -> dict[str, Any] | None:
-    """取该工作流最早的一个未结束 run；没有则 None。"""
+def _dispatch(
+    row: dict[str, Any], slot: datetime, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """按计划的扇出模式分派：none 保持"一次到点一个 run"，其余走批量展开。"""
+    mode = str(row.get("fanout_mode") or "none")
+    if mode == "none":
+        return _spawn(row, slot, now=now)
+    return _spawn_batch(row, slot, now=now)
+
+
+def _expand_subjects(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """按 fanout_mode 展开主体列表。
+
+    - `tenant_active`：本租户 status='active' 的主体；
+    - `static_list`：按显式名单（external_ref 或平台 id）解析，解析不到的跳过；
+    - 其余：调用方不会走到这里。
+    """
+    mode = str(row.get("fanout_mode") or "none")
+    if mode == "tenant_active":
+        return users_store.list_active_users(row["tenant_id"])
+    if mode == "static_list":
+        spec = row.get("fanout_spec") or {}
+        refs = spec.get("user_ids") if isinstance(spec, dict) else []
+        return users_store.resolve(row["tenant_id"], list(refs or []))
+    return []
+
+
+def _spawn_batch(
+    row: dict[str, Any], slot: datetime, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """为一个计划时刻按主体展开建 N 个 run（P5-T03/T04/T05）。
+
+    与 `_spawn` 的差异：
+    - 一个主体一个 run：`subject.user_id` 与 `window` 都带主体，重复投递只合并同一个人；
+    - 重叠判定按主体，一个用户卡住不影响其他用户；
+    - 一批只写一条审计（1000 个用户不能写 1000 行触发事件）；
+    - 超限（`fanout_limit`）或超总预算（`AO_FANOUT_BUDGET_CAP`）整批拒绝，不截断。
+    """
+    now = now or datetime.now(UTC)
+    policy = _policy(row.get("overlap_policy"))
+    limit = _bounded(row.get("fanout_limit"), 1000, low=1, high=MAX_FANOUT_LIMIT)
+    per_run = float(row.get("budget_per_run") or 0)
+    audit_key = f"{row['id']}:{int(slot.timestamp())}:fanout"
+
+    subjects = _expand_subjects(row)
+    if not subjects:
+        detail = f"扇出主体为空（mode={row.get('fanout_mode')}）"
+        _record(
+            row,
+            slot,
+            "skipped",
+            detail=detail,
+            key=audit_key,
+            extra={"fanout_mode": row.get("fanout_mode"), "total": 0},
+        )
+        logger.warning("扇出主体为空: trigger=%s workflow=%s", row["id"], row["workflow_id"])
+        return {
+            "trigger_id": row["id"],
+            "status": "skipped",
+            "policy": policy,
+            "detail": detail,
+            "scheduled_for": slot.isoformat(),
+        }
+
+    # 超限一律拒绝整批：截断会让业务方以为"所有用户都跑了"
+    if len(subjects) > limit:
+        detail = f"fanout_limit_exceeded: {len(subjects)}>{limit}"
+        _record(
+            row,
+            slot,
+            "failed",
+            detail=detail,
+            key=audit_key,
+            extra={"fanout_mode": row.get("fanout_mode"), "total": len(subjects), "limit": limit},
+        )
+        logger.warning("扇出超限，整批拒绝: trigger=%s %s", row["id"], detail)
+        return {
+            "trigger_id": row["id"],
+            "status": "failed",
+            "policy": policy,
+            "detail": detail,
+            "scheduled_for": slot.isoformat(),
+        }
+
+    cap = settings.fanout_budget_cap
+    if cap > 0 and per_run > 0 and len(subjects) * per_run > cap:
+        detail = f"fanout_budget_cap_exceeded: {len(subjects)}x{per_run}>{cap}"
+        _record(
+            row,
+            slot,
+            "failed",
+            detail=detail,
+            key=audit_key,
+            extra={"fanout_mode": row.get("fanout_mode"), "total": len(subjects)},
+        )
+        logger.warning("扇出超总预算，整批拒绝: trigger=%s %s", row["id"], detail)
+        return {
+            "trigger_id": row["id"],
+            "status": "failed",
+            "policy": policy,
+            "detail": detail,
+            "scheduled_for": slot.isoformat(),
+        }
+
+    downgraded = policy == "buffer_one"
+    if downgraded:
+        # pending_fire_at 是单槽位，按主体缓冲需要新表（B 期之后）；本期显式降级并留痕
+        policy = "skip"
+        logger.warning("扇出不支持 buffer_one，降级为 skip: trigger=%s", row["id"])
+
+    created = skipped = failed = 0
+    sample: list[str] = []
+    first_error = ""
+    for subject in subjects:
+        uid = str(subject.get("external_ref") or subject["id"])
+        try:
+            running = _running_run(row["workflow_id"], uid)
+            if running:
+                if policy == "cancel_other":
+                    run_state.request_cancel(
+                        str(running["id"]), actor="trigger:fanout_cancel_other"
+                    )
+                else:
+                    skipped += 1
+                    logger.debug(
+                        "扇出跳过（该主体有在跑的 run）: trigger=%s user=%s run=%s",
+                        row["id"],
+                        uid,
+                        running["id"],
+                    )
+                    continue
+            run_id, did_create = runs_store.create_run(
+                tenant_id=row["tenant_id"],
+                workflow_id=row["workflow_id"],
+                version=int(row["version"]),
+                package_ref=row["package_ref"],
+                subject={
+                    "trigger_id": row["id"],
+                    "scheduled_for": slot.isoformat(),
+                    "user_id": uid,
+                    "platform_user_id": subject["id"],
+                },
+                # 幂等键带主体：同一时刻不同用户互不影响，同一个人重复投递只落一个 run
+                window=f"{slot.isoformat()}#{uid}",
+                trigger_user_id=subject["id"],
+                budget_usd=per_run,
+            )
+            if did_create:
+                created += 1
+            else:
+                # 幂等键命中：同一主体同一时刻已经有 run，不算新建
+                skipped += 1
+            if len(sample) < 5:
+                sample.append(run_id)
+            logger.debug(
+                "扇出建 run: trigger=%s user=%s run=%s 新建=%s",
+                row["id"],
+                uid,
+                run_id,
+                did_create,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 单主体失败不影响其他用户；但不在循环里逐条打 error（1000 用户会冲爆日志）
+            failed += 1
+            if not first_error:
+                first_error = str(exc)[:200]
+
+    status = "consumed" if created else ("failed" if failed else "skipped")
+    detail = f"扇出 {len(subjects)} 个主体：新建 {created}，跳过 {skipped}，失败 {failed}"
+    if downgraded:
+        detail += "；buffer_one 在扇出下降级为 skip"
+    payload = {
+        "fanout_mode": row.get("fanout_mode"),
+        "total": len(subjects),
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+        "limit": limit,
+        "run_ids_sample": sample,
+    }
+    if first_error:
+        payload["first_error"] = first_error
+    _record(row, slot, status, detail=detail, key=audit_key, extra=payload)
+    logger.info(
+        "扇出完成: workflow=%s slot=%s 总数=%s 新建=%s 跳过=%s 失败=%s",
+        row["workflow_id"],
+        slot.isoformat(),
+        len(subjects),
+        created,
+        skipped,
+        failed,
+    )
+    if failed:
+        logger.error(
+            "扇出存在失败主体: trigger=%s 失败数=%s 首个错误=%s",
+            row["id"],
+            failed,
+            first_error,
+        )
+    return {
+        "trigger_id": row["id"],
+        "status": status,
+        "policy": policy,
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+        "run_ids": sample,
+        "scheduled_for": slot.isoformat(),
+    }
+
+
+def _running_run(workflow_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+    """取未结束的 run；给了 user_id 就只在该主体范围内找（扇出用）。"""
+    if user_id is None:
+        return fetch_one(
+            "SELECT id, status FROM runs WHERE workflow_id = %s"
+            " AND status IN ('queued','running') ORDER BY created_at LIMIT 1",
+            (workflow_id,),
+        )
     return fetch_one(
-        "SELECT id, status FROM runs WHERE workflow_id = %s"
+        "SELECT id, status FROM runs WHERE workflow_id = %s AND subject->>'user_id' = %s"
         " AND status IN ('queued','running') ORDER BY created_at LIMIT 1",
-        (workflow_id,),
+        (workflow_id, str(user_id)),
     )
 
 
@@ -630,12 +867,19 @@ def _record(
     detail: str = "",
     run_id: str | None = None,
     key: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
-    """写触发审计；默认以计划时刻为粒度，重复扫描会覆盖同一条。"""
+    """写触发审计；默认以计划时刻为粒度，重复扫描会覆盖同一条。
+
+    `extra` 用于扇出汇总（total/created/skipped/failed 等）——一批只落一行，
+    单用户结果查 `runs.subject->>'user_id'`，不往审计表里写 N 行。
+    """
     event_key = key or f"{row['id']}:{int(moment.timestamp())}"
     payload: dict[str, Any] = {"detail": detail, "scheduled_for": moment.isoformat()}
     if run_id:
         payload["run_id"] = run_id
+    if extra:
+        payload.update({k: v for k, v in extra.items() if v is not None})
     with tx() as conn:
         conn.execute(
             "INSERT INTO trigger_events (id, workflow_id, trigger_id, event_key, payload, status)"
@@ -654,6 +898,37 @@ def _policy(raw: Any) -> str:
     """重叠策略兜底：未知值一律按 skip，绝不放宽重叠保护。"""
     value = str(raw or "").strip()
     return value if value in OVERLAP_POLICIES else "skip"
+
+
+def _normalize_fanout(raw: Any) -> dict[str, Any]:
+    """把 manifest 的 fanout 段归一成 DB 四列（mode/spec/limit/budget）。
+
+    manifest 形态：
+        {"mode": "tenant_active", "limit": 1000, "budget_per_run": 0.5}
+        {"mode": "static_list", "user_ids": ["u1", "u2"]}
+    `spec` 只保留当前模式用得到的部分，避免把无关字段写进 DB 后被误读。
+    """
+    data = raw if isinstance(raw, dict) else {}
+    mode = str(data.get("mode") or "none").strip() or "none"
+    if mode not in {"none", "tenant_active", "static_list"}:
+        # 发布期应已拒绝；这里兜底回 none，绝不让未知模式走到建 run
+        logger.warning("未知扇出模式，回落 none: %s", mode)
+        mode = "none"
+    try:
+        budget = float(data.get("budget_per_run") or 0)
+    except (TypeError, ValueError):
+        budget = 0.0
+    spec: dict[str, Any] = {}
+    if mode == "static_list":
+        spec["user_ids"] = [
+            str(ref).strip() for ref in (data.get("user_ids") or []) if str(ref).strip()
+        ]
+    return {
+        "mode": mode,
+        "spec": spec,
+        "limit": _bounded(data.get("limit"), 1000, low=1, high=MAX_FANOUT_LIMIT),
+        "budget": max(0.0, budget),
+    }
 
 
 def _bounded(raw: Any, default: int, *, low: int, high: int) -> int:

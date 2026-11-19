@@ -85,6 +85,15 @@ class Settings:
     # 空值表示只在 dev 环境放行事件入站；生产必须配，否则裸开等于给所有人一个触发器
     event_token: str = ""
 
+    # --- 运维接口（P5-T01）---
+    # 主体目录的读写只对运维开放；空值表示仅 dev 放行（与事件入站同构）
+    ops_token: str = ""
+
+    # --- 扇出（P5）---
+    # 一批扇出的总预算兜底 = 展开主体数 × budget_per_run；0 表示不限。
+    # 与计划自身的 fanout_limit 是两级闸门：limit 管"人数"，这里管"钱"。
+    fanout_budget_cap: float = 0.0
+
     # --- 创作面（P2-T11）---
     uploads_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "uploads")
     upload_max_mb: float = 10.0
@@ -139,6 +148,8 @@ class Settings:
             gateway_sync_interval=_float("AO_GATEWAY_SYNC_INTERVAL", 60.0),
             # 注意用 or：.env 里写了空值时应回落到默认目录，而不是 Path(".")
             event_token=os.environ.get("AO_EVENT_TOKEN", ""),
+            ops_token=os.environ.get("AO_OPS_TOKEN", ""),
+            fanout_budget_cap=_float("AO_FANOUT_BUDGET_CAP", 0.0),
             uploads_dir=Path(os.environ.get("AO_UPLOADS_DIR") or str(PROJECT_ROOT / "uploads")),
             upload_max_mb=_float("AO_UPLOAD_MAX_MB", 10.0),
             planner_summary_after=_int("AO_PLANNER_SUMMARY_AFTER", 20),

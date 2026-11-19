@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 
 from ao import resources
 from ao import triggers as trigger_store
+from ao import users as users_store
 from ao.cron import timezone_of
 from ao.db import fetch_all
 from ao.planner import draft as draft_store
@@ -338,6 +339,55 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, **result}
+
+    def _ops_allowed(request: Request) -> bool:
+        """运维接口鉴权：与事件入站同构（令牌 + dev 兜底）。
+
+        P3-T02 的账号/API Key 体系未落地前，主体目录的读写只开放给运维：
+        生产必须配 `AO_OPS_TOKEN`，dev 允许本机直接调。
+        """
+        if settings.ops_token:
+            return request.headers.get("X-AO-Ops-Token") == settings.ops_token
+        return settings.env == "dev"
+
+    @app.get("/api/users")
+    def list_users(request: Request, tenant_id: str | None = None) -> dict[str, Any]:
+        """列出可被扇出的主体（运维排查用；不返回 password_hash 等敏感列）。"""
+        if not _ops_allowed(request):
+            raise HTTPException(status_code=401, detail="运维令牌不正确或未配置")
+        return {"ok": True, "users": users_store.list_active_users(tenant_id)}
+
+    @app.post("/api/users")
+    async def upsert_user(request: Request) -> dict[str, Any]:
+        """同步一个主体到引擎侧目录（业务系统推送或人工补录）。
+
+        `external_ref` 是业务主键，重复写入按 (tenant, external_ref) 幂等更新。
+        """
+        if not _ops_allowed(request):
+            raise HTTPException(status_code=401, detail="运维令牌不正确或未配置")
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — 非 JSON 一律按 400 处理
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是对象")
+        try:
+            row = users_store.upsert(
+                tenant_id=body.get("tenant_id"),
+                external_ref=str(body.get("external_ref") or ""),
+                display_name=body.get("display_name"),
+                status=str(body.get("status") or "active"),
+            )
+        except users_store.UserError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "user": {
+                "id": row["id"],
+                "external_ref": row["external_ref"],
+                "status": row["status"],
+            },
+        }
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

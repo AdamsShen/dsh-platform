@@ -6,6 +6,22 @@
 
 **编号口径（2026-11-19 起生效）**：规格编号（`docs/plans/spec/`）与 STATUS 历史编号曾出现撞车，以本文件结尾「编号映射」一节为唯一裁决。冲突点：规格的 `P2-T16` 是"复用与派生验收"，STATUS 历史里的 `P2-T16` 是"MCP/Skill 工作流级绑定"——后者保留原编号但语义只指绑定，前者改为 `P2-T20`。
 
+## 执行进度（按 `docs/plans/2026-11-19-remaining-work-plan.md`）
+
+| 里程碑 | 工作项 | 状态 | 验收（可复跑） |
+|---|---|---|---|
+| M0 | W01 提交工作区 | ✅ | 3 个提交已推送（`da9cc38`） |
+| M0 | W02 补 ADR | ✅ | `docs/decisions/` 8 份（001/002/003/005/006/010/011/012） |
+| M0 | W03 修正失效命令入口 | ✅ | `make demo` / `make drill` / `make drill-fanout` 可跑（原 `scripts/demo.py`、`scripts/capacity.py` 不存在） |
+| M1 | W10 用户目录接线 | ✅ | `users.external_ref` + `src/ao/users.py` + `GET/POST /api/users` + `scripts/seed_users.py` |
+| M1 | W11 扇出数据模型 | ✅ | `migrations/012_fanout.sql` + `manifest._validate_fanout` + `triggers.project` 落 4 列 |
+| M1 | W12 展开与建 run | ✅ | `triggers._expand_subjects` / `_spawn_batch`，`window` 带主体，一批一条汇总审计 |
+| M1 | W13 重叠按主体 | ✅ | `_running_run(workflow_id, user_id)`；`buffer_one` 扇出下降级 skip + warn |
+| M1 | W14 预算与限流 | ✅ | `fanout_limit` 超限整批拒绝；`budget_per_run` → `runs.budget_usd`；`AO_FANOUT_BUDGET_CAP` |
+| M1 | W15 端到端验收 | ✅ | `tests/e2e/test_fanout.py` 13 条 + `make drill-fanout` 5/5；全量 149 passed |
+
+**M1 实测（2026-11-19）**：10 主体展开耗时 0.05s、重复投递 0.02s；单主体卡住只跳过 1 个（`created=9 skipped=1`）；1200>limit 整批 0 run + `failed` 审计。
+
 ## P1 执行内核
 
 | 任务 | 状态 | 说明 |
@@ -116,17 +132,17 @@ P2 功能面已交付 15 项（当前基线 `uv run pytest -q` → 136 passed, 1
 | 3 | **节点级**绑定 MCP/Skill | ✅ | 2026-11-19 P6-T01~T04：`bindings_for_node()`（MCP 同名覆盖 / Skill 并集）+ `RunRuntime._tools_for()` 按节点解析并缓存；`call_agent` 的 `mcp/skills` 作为 turn 级覆盖真正生效；发布期 issue 带 `node` | P6 已完成 |
 | 4 | 提示词支持 Jinja2 | ✅ | `SandboxedEnvironment + StrictUndefined`（`vars.py:23`） | 已完成 |
 | 5 | harness 按变量查 MCP 取数 | 🟡 | 平台侧预取（`vars.py:87` `mcp.call`），不是 harness 驱动 | 口径差异，暂不阻塞 |
-| 6 | 多人并发对话 / 多工作流并行 | 🟡 | 创作池/执行池隔离有；`users` 表已建（`migrations/001_init.sql:12`）但**全仓无代码读写**，鉴权是签名 cookie | P5-T01 |
+| 6 | 多人并发对话 / 多工作流并行 | ✅ | 2026-11-19 P5-T01：主体目录可读写（`src/ao/users.py` + `/api/users`），创作池/执行池已物理隔离；**鉴权仍是签名 cookie**（账号体系属 P3-T02，未开工） | P5-T01 已完成 |
 | 7 | 生成与执行都在沙箱 | 🟡 | 执行在 DSH 沙箱；`graph.py` 仍 `importlib.exec_module` 在主进程 | P1-T13 |
 | 8 | 工作流复用、可改提示词/MCP/Skill | 🟡 | 包可复用；`parent_id` 只建表，无 clone API | P2-T10 |
-| 9 | 定时触发**按用户扇出** | ❌ | 一次到点只建一个 run，`subject` 无 user 维度（`triggers.py:443`） | P5-T02~T05 |
+| 9 | 定时触发**按用户扇出** | ✅ | 2026-11-19 P5-T03~T05：`_spawn_batch` 一时刻展开 N 个 run，`subject.user_id` 与 `window` 带主体；重叠按主体判定；超限/超预算整批拒绝（`tests/e2e/test_fanout.py`） | P5-T03~T05 已完成 |
 | 10 | 云上部署 | 🟡 | 单机可跑；包只落本地目录，跨机解析不了 | P5-T07 |
-| 11 | 总/工作流/用户三层费用 | 🟡 | `llm_usage` 无 user 列（`migrations/001_init.sql`），用户维度靠 `JOIN runs.subject->>'user_id'` 且无索引 | P5-T06 |
+| 11 | 总/工作流/用户三层费用 | 🟡 | `llm_usage.user_id` 列与索引已随 012 落库，但 `usage.record` 尚未写入该列 | P5-T06 |
 | 12 | 人工停止/重试/审计 | 🟡 | `state.request_cancel` / `state.resume` 有，13 个路由里无 `/stop` `/retry` | P3-T04 |
 | 13 | 沙箱权限与提示词边界 | 🟡 | 输入中和 ✅（`input_guard.py`）；`egress` / `allowlist` / 凭据代理全仓零命中；MCP 只读契约无 | P1-T16 / T17 |
 | 14 | 挂了自动接管 | 🟡 | 租约 + fencing + 同机 resume 有；跨机重放依赖对象存储 | P5-T07 + P1-T10 |
 
-**统计：✅ 3 条（#2 系统词、#3 节点级绑定、#4 Jinja2）、🟡 9 条、❌ 2 条（#1 前端、#9 扇出）。**
+**统计（2026-11-19 M1 后）：✅ 5 条（#2 系统词、#3 节点级绑定、#4 Jinja2、#6 主体目录、#9 扇出）、🟡 8 条、❌ 1 条（#1 前端）。**
 
 **结论：改计划，不重新制定。** 判据是地基是否还有效——14 条需求本身没变（设计 §0 就是这 14 行），租约队列 / fencing / 状态机 / 网关记账（真实 LiteLLM 14/14）/ 包冻结发布 / 规划七步均已实测在跑，重写等于把已验证的 12 人日再赌一次；3 条 ❌ 中有 2 条（前端、扇出）规格已存在，只是没排期。真正的问题是三处记录失真：沙箱组被一行 ✅ 打包、P2 编号撞车、P2 派生从未记录。
 
