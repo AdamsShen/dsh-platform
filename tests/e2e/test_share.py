@@ -32,10 +32,14 @@ SCHEMA: dict[str, Any] = {
             "type": "table",
             "title": "运行记录",
             "source": "runs",
-            "columns": [{"field": "id", "label": "ID", "format": "text"}],
+            "columns": [
+                {"field": "id", "label": "ID", "format": "text"},
+                {"field": "spent_usd", "label": "花费", "format": "number"},
+            ],
             "onRowClick": {"source": "run", "param": "id"},
         },
         {"type": "detail", "title": "详情", "source": "run"},
+        {"type": "button", "label": "取消本次运行", "action": {"action": "run.cancel"}},
     ],
 }
 
@@ -164,6 +168,26 @@ def test_revoked_and_expired_links_are_404(
         )
     assert client.get(f"/s/{revoked_token}").status_code == 404
     assert client.get("/s/s_not-a-real-token").status_code == 404
+
+
+def test_shared_page_hides_buttons_and_cost(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """分享页不出现写按钮，也不暴露成本字段；发布物本身保持原样。"""
+    workflow_id, ref = _package(tmp_path)
+    token = _link(workflow_id)
+
+    # 页面真值是编进 app.js 的 PAGE 常量，所以投影要看 app.js
+    js = client.get(f"/s/{token}/app.js").text
+    assert "取消本次运行" not in js
+    assert "run.cancel" not in js
+    assert "spent_usd" not in js
+    assert "花费" not in js
+
+    original = (Path(ref) / "ui" / "compiled" / "main" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "run.cancel" in original and "spent_usd" in original
 
 
 def test_max_uses_exhausts_with_429(client: TestClient, tmp_path: Path) -> None:

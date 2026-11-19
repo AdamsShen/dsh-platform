@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from ao import audit, resources
@@ -25,10 +25,13 @@ from ao import triggers as trigger_store
 from ao import users as users_store
 from ao.cron import timezone_of
 from ao.db import fetch_all, fetch_one
+from ao.pages import compiler as page_compiler
 from ao.pages import datasources as page_data
 from ao.pages import editor as page_editor
 from ao.pages import hosting as page_hosting
+from ao.pages import nl_edit as page_nl
 from ao.pages import schema as page_schema
+from ao.pages import share_view as page_share_view
 from ao.pages.schema import ACTIONS as PAGE_ACTIONS
 from ao.planner import draft as draft_store
 from ao.planner import orchestrator
@@ -326,6 +329,24 @@ def create_app() -> FastAPI:
         except page_editor.EditorError as exc:
             return RedirectResponse(f"{base}?error={quote(str(exc))}", status_code=303)
         return RedirectResponse(base, status_code=303)
+
+    @app.post("/planner/{session_id}/pages/{page_id}/nl")
+    async def page_editor_nl(
+        request: Request, session_id: str, page_id: str
+    ) -> RedirectResponse:
+        """一句话改页面：解析成同一套编辑操作，落盘仍走校验。
+
+        不调模型：加列/删列/加按钮的语法稳定，用规则解析比模型更可控；
+        解析不出来就明确告诉用户"没听懂"，不猜一个改动出去。
+        """
+        root = _draft_root(session_id)
+        form = await request.form()
+        text = str(form.get("text") or "").strip()
+        outcome = page_nl.apply_text(root, page_id, text)
+        base = f"/planner/{session_id}/pages/{page_id}"
+        if not outcome["ok"]:
+            return RedirectResponse(f"{base}?error={quote(outcome['message'])}", status_code=303)
+        return RedirectResponse(f"{base}?ok={quote(outcome['message'])}", status_code=303)
 
     @app.get("/planner/{session_id}/pages/{page_id}/preview/{asset:path}")
     def page_editor_preview(session_id: str, page_id: str, asset: str) -> FileResponse:
@@ -856,12 +877,44 @@ def create_app() -> FastAPI:
         return {"ok": True, "rows": rows}
 
     # 放在 /s/{token}/data/{name} 之后：catch-all 先声明会把 data 路径吃掉
+    _SHARE_MEDIA = {
+        "index.html": "text/html; charset=utf-8",
+        "app.js": "application/javascript; charset=utf-8",
+        "theme.css": "text/css; charset=utf-8",
+    }
+
     @app.get("/s/{token}/{asset:path}")
-    def share_asset(token: str, asset: str) -> FileResponse:
+    def share_asset(token: str, asset: str) -> Response:
         share = _share(token)
         try:
             root = page_hosting.package_root(share["workflow_id"], int(share["version"]))
-            path = page_hosting.resolve_asset(root, share["page_id"], asset)
+            page_hosting.page_dir(root, str(share["page_id"]))
+        except page_hosting.HostingError as exc:
+            share_store.touch(share, status=404)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        if asset in _SHARE_MEDIA:
+            # 分享态现投影再编译：去写操作与成本字段，发布物本身不动
+            schema = page_hosting.page_schema(root, str(share["page_id"]))
+            try:
+                files = page_compiler.compile_page(page_share_view.project(schema))
+            except (page_schema.PageSchemaError, AssertionError) as exc:
+                share_store.touch(share, status=404)
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            share_store.touch(share, status=200)
+            return Response(
+                files[asset],
+                media_type=_SHARE_MEDIA[asset],
+                headers={
+                    "Content-Security-Policy": page_hosting.PAGE_CSP,
+                    "Referrer-Policy": "no-referrer",
+                    "X-Content-Type-Options": "nosniff",
+                    "Cache-Control": "no-store",
+                },
+            )
+
+        try:
+            path = page_hosting.resolve_asset(root, str(share["page_id"]), asset)
         except page_hosting.HostingError as exc:
             share_store.touch(share, status=404)
             raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -138,6 +138,54 @@ def apply_op(
     return {**schema, "blocks": blocks}
 
 
+def apply_text_op(
+    schema: dict[str, Any], op: str, payload: dict[str, str]
+) -> dict[str, Any]:
+    """对话式改动的入口：不带块序号，由内容自己定位（第一张表）。
+
+    UI 编辑要人来指"改哪一块"，一句话改页面则由语义决定目标；两者共用
+    `apply_op` 的底层操作，避免出现两套改法。
+    """
+    blocks = list(schema.get("blocks") or [])
+    if op == "add_column":
+        index = next(
+            (i for i, block in enumerate(blocks) if block.get("type") == "table"), None
+        )
+        if index is None:
+            raise EditorError("当前页面没有表格，加列前先加一张表")
+        return apply_op(schema, "add_column", index, payload)
+    if op == "remove_column":
+        field = (payload.get("field") or "").strip()
+        for block in blocks:
+            if block.get("type") != "table":
+                continue
+            columns = [
+                col for col in (block.get("columns") or []) if col.get("field") != field
+            ]
+            if len(columns) == len(block.get("columns") or []):
+                continue
+            if not columns:
+                raise EditorError(f"删掉「{field}」后表格就没有列了")
+            block["columns"] = columns
+            return {**schema, "blocks": blocks}
+        raise EditorError(f"表格里没有这一列: {field}")
+    if op == "add_block":
+        block = _blank((payload.get("value") or "").strip())
+        if payload.get("label"):
+            if block["type"] == "button":
+                block["label"] = payload["label"]
+            else:
+                block["title"] = payload["label"]
+        action = (payload.get("action") or "").strip()
+        if action:
+            if action not in page_schema.ACTIONS:
+                raise EditorError(f"动作不在白名单: {action}")
+            block["action"] = {"action": action}
+        blocks.append(block)
+        return {**schema, "blocks": blocks}
+    raise EditorError(f"不支持的对话式操作: {op}")
+
+
 def save_page(root: Path, page_id: str, schema: dict[str, Any]) -> dict[str, Any]:
     """校验 + 写盘 + 编译；返回校验归一化后的 Schema。"""
     try:

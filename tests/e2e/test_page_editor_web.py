@@ -74,6 +74,36 @@ def test_editor_add_column_then_preview(client: TestClient) -> None:
     assert "Content-Security-Policy" in preview.headers
 
 
+def test_editor_nl_adds_column_via_sentence(client: TestClient) -> None:
+    """对话式改页面走同一套编辑落盘，且只改 Schema。"""
+    session_id = _session()
+    resp = client.post(
+        f"/planner/{session_id}/pages/main/nl",
+        data={"text": "表格加一列花费"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "ok=" in resp.headers["location"]
+
+    saved = json.loads(
+        (draft_store.draft_dir(session_id) / "ui" / "pages" / "main.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "spent_usd" in [col["field"] for col in saved["blocks"][0]["columns"]]
+
+
+def test_editor_nl_reports_unparsed_sentence(client: TestClient) -> None:
+    session_id = _session()
+    resp = client.post(
+        f"/planner/{session_id}/pages/main/nl",
+        data={"text": "把页面做成赛博朋克风"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+
+
 def test_editor_reports_error_without_writing(client: TestClient) -> None:
     session_id = _session()
     resp = client.post(
