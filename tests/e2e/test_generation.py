@@ -42,7 +42,8 @@ PLAN = {
             "kind": "agent",
             "duty": "拉取用户角色卡与日程",
             "outputs": {"items": "str"},
-            "mcp": ["mcp__roles__get"],
+            # 节点级绑定在 P6 起真正生效：这里的 ref 必须能被 resources 解析，
+            # 所以本用例不写（节点绑定链路由 tests/e2e/test_node_bindings.py 覆盖）
         },
         {
             "id": "draft",

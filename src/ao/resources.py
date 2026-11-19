@@ -79,37 +79,58 @@ def resolve_bindings(
     return servers, skills, skipped
 
 
+def _check_one(
+    kind: str, ref: str, *, user_id: str | None, node_id: str | None
+) -> dict[str, Any] | None:
+    """单个绑定的可见性校验；`node_id` 非空表示这是节点级引用。"""
+    if get(kind=kind, ref=ref, user_id=user_id) is not None:
+        return None
+    any_row = fetch_one(
+        "SELECT scope, owner_user_id, enabled FROM resources WHERE kind = %s AND ref = %s"
+        " ORDER BY (scope = 'private') DESC LIMIT 1",
+        (kind, ref),
+    )
+    where = f"节点 {node_id} 的 " if node_id else ""
+    if any_row is None:
+        # 节点级引用要在文案里指明"去该节点改"，说"工作流设置"会把用户带错地方
+        hint = "在该节点绑定里重新选择" if node_id else "先在工作流设置里选择可用资源"
+        return {
+            "code": "E_BINDING_MISSING",
+            "node": node_id,
+            "message": f"{where}{kind} 绑定不存在: {ref}（{hint}）",
+        }
+    if not any_row["enabled"]:
+        return {
+            "code": "E_BINDING_DISABLED",
+            "node": node_id,
+            "message": f"{where}{kind} 已下架: {ref}",
+        }
+    return {
+        "code": "E_BINDING_FORBIDDEN",
+        "node": node_id,
+        "message": f"{where}{kind} 是他人私有资源，不能引用: {ref}",
+    }
+
+
 def check_bindings(manifest: Any, *, user_id: str | None) -> list[dict[str, Any]]:
-    """发布期校验：每个绑定都必须可解析，并说明失败原因。"""
+    """发布期校验：每个绑定都必须可解析，并定位到具体节点。
+
+    工作流级引用只报一次（`node` 为 null）；节点级引用逐节点报，
+    同名 ref 已在工作流级校验过的不重复报，避免一个错误刷出两行。
+    """
     issues: list[dict[str, Any]] = []
-    for binding in manifest.effective_bindings():
-        kind, ref = binding.kind, binding.ref
-        row = get(kind=kind, ref=ref, user_id=user_id)
-        if row is not None:
-            continue
-        any_row = fetch_one(
-            "SELECT scope, owner_user_id, enabled FROM resources WHERE kind = %s AND ref = %s"
-            " ORDER BY (scope = 'private') DESC LIMIT 1",
-            (kind, ref),
-        )
-        if any_row is None:
-            issues.append(
-                {
-                    "code": "E_BINDING_MISSING",
-                    "message": f"{kind} 绑定不存在: {ref}（先在工作流设置里选择可用资源）",
-                }
-            )
-        elif not any_row["enabled"]:
-            issues.append(
-                {"code": "E_BINDING_DISABLED", "message": f"{kind} 已下架: {ref}"}
-            )
-        else:
-            issues.append(
-                {
-                    "code": "E_BINDING_FORBIDDEN",
-                    "message": f"{kind} 是他人私有资源，不能引用: {ref}",
-                }
-            )
+    workflow_keys = {(binding.kind, binding.ref) for binding in manifest.bindings}
+    for binding in manifest.bindings:
+        issue = _check_one(binding.kind, binding.ref, user_id=user_id, node_id=None)
+        if issue:
+            issues.append(issue)
+    for node in manifest.nodes:
+        for binding in manifest.bindings_for_node(node):
+            if (binding.kind, binding.ref) in workflow_keys:
+                continue
+            issue = _check_one(binding.kind, binding.ref, user_id=user_id, node_id=node.id)
+            if issue:
+                issues.append(issue)
     return issues
 
 

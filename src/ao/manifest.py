@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ao.cron import validate_cron
 
 OUTPUT_TYPES = {"str", "int", "float", "bool"}
+#: 单个节点最多绑定多少个 MCP / Skill：每 turn 都要按绑定建连，上限防"每个节点挂一堆"
+NODE_BINDING_LIMIT = 8
 _REF_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _WHEN_RE = re.compile(r"^\s*([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$")
 _OPS = {
@@ -47,6 +49,7 @@ class Node(BaseModel):
     #: 包内相对路径；内容由 wf_sdk 按节点 id 读取，代码里不内联提示词
     system: str | None = None
     prompt: str | None = None
+    #: 节点级工具绑定（P6）：只影响该节点；空表示完全继承工作流级 bindings
     mcp: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     capability: str = "read_only"
@@ -80,10 +83,11 @@ class Trigger(BaseModel):
 
 
 class Binding(BaseModel):
-    """工作流级工具绑定：MCP server 或 skill。
+    """工具绑定：MCP server 或 skill。
 
-    绑定属于整个工作流而不是节点——"能用哪些工具"是运行环境的一部分，
-    节点只描述"做什么"。节点级 `mcp/skills` 字段保留解析（老包兼容），生成器不再写。
+    工作流级 `bindings` 是所有节点的默认工具集；节点级 `mcp/skills` 在默认集上
+    覆盖/追加（合并规则见 `Manifest.bindings_for_node`）。节点级引用是裸 ref，
+    不带 scope/owner，因此同名时沿用工作流级的声明。
     """
 
     kind: Literal["mcp", "skill"]
@@ -129,6 +133,32 @@ class Manifest(BaseModel):
                         seen.add(key)
                         merged.append(Binding(kind=kind, ref=ref, scope="global"))  # type: ignore[arg-type]
         return merged
+
+    def bindings_for_node(self, node: Node) -> list[Binding]:
+        """该节点实际生效的绑定：工作流级默认 + 节点级覆盖。
+
+        合并规则（设计 §3.1）：
+        - MCP 同名（同 ref）由节点级覆盖工作流级；
+        - Skill 并集去重；
+        - 节点未写任何 ref = 完全继承工作流级（老包行为与改造前一致）。
+
+        节点级引用是裸 ref，没有 scope/owner，同名时沿用工作流级的声明：
+        否则私有绑定会被降级成 global，解析到另一个同名资源。
+        """
+        merged: dict[tuple[str, str], Binding] = {}
+        for binding in self.bindings:
+            merged[(binding.kind, binding.ref)] = binding
+        for kind, refs in (("mcp", node.mcp), ("skill", node.skills)):
+            for ref in refs:
+                key = (kind, ref)
+                inherited = merged.get(key)
+                merged[key] = Binding(
+                    kind=kind,  # type: ignore[arg-type]
+                    ref=ref,
+                    scope=inherited.scope if inherited else "global",
+                    owner=inherited.owner if inherited else None,
+                )
+        return list(merged.values())
 
     def mcp_refs(self) -> list[str]:
         return [b.ref for b in self.effective_bindings() if b.kind == "mcp"]
@@ -201,6 +231,22 @@ def validate_graph(manifest: Manifest) -> None:
         for name, kind in node.outputs.items():
             if kind not in OUTPUT_TYPES:
                 raise ValueError(f"节点 {node.id} 的 outputs.{name} 类型不支持: {kind}")
+        # 节点级绑定（P6）：ref 规则与工作流级一致；上限防"每节点挂一堆 MCP"导致每 turn 建连爆炸
+        for kind, refs in (("mcp", node.mcp), ("skill", node.skills)):
+            unique = list(dict.fromkeys(refs))
+            if len(unique) > NODE_BINDING_LIMIT:
+                raise ValueError(
+                    f"节点 {node.id} 的 {kind} 绑定 {len(unique)} 个，超过上限"
+                    f" {NODE_BINDING_LIMIT}"
+                )
+            for ref in unique:
+                if not _REF_RE.match(ref):
+                    raise ValueError(
+                        f"节点 {node.id} 的 {kind} 绑定 ref 不合法: {ref!r}"
+                        "（小写字母/数字开头，允许 _ . -，最长 64）"
+                    )
+        node.mcp = list(dict.fromkeys(node.mcp))
+        node.skills = list(dict.fromkeys(node.skills))
         if node.when:
             match = _WHEN_RE.match(node.when)
             if not match:

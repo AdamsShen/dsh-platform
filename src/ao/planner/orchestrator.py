@@ -20,10 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from ao import codegen, static_check
+from ao import codegen, resources, static_check
 from ao import triggers as trigger_store
 from ao.cron import validate_cron
-from ao.manifest import parse
+from ao.manifest import NODE_BINDING_LIMIT, parse
 from ao.package import freeze_package, load_package
 from ao.planner import draft as draft_store
 from ao.planner import memory
@@ -154,14 +154,73 @@ def _clarify(context: dict[str, Any]) -> list[str]:
     return questions
 
 
-def _nodes_prompt(requirement: str) -> str:
+def _available_for(user_id: str | None) -> list[dict[str, Any]]:
+    """当前用户可见的 MCP / Skill 清单。
+
+    读库失败不能让整条生成链挂掉：退化为"不注入候选"，发布期仍然会校验。
+    """
+    try:
+        return resources.list_available(user_id=user_id)
+    except Exception:  # noqa: BLE001 — 生成不依赖资源清单，缺了只是少一层提示
+        logger.warning("读取资源清单失败，本次生成不注入候选绑定", exc_info=True)
+        return []
+
+
+def _check_draft_node_bindings(draft: Any, *, user_id: str | None) -> list[dict[str, Any]]:
+    """保存草稿时就校验节点级绑定的存在性，不等发布。
+
+    页面上的勾选项来自 `list_available`，正常路径选不出不存在的 ref；
+    但 API / 生成器写的草稿可能带未知 ref，这里提前报错并指到节点。
+    """
+    issues: list[dict[str, Any]] = []
+    for node in draft.nodes:
+        for kind, refs in (
+            ("mcp", node.get("mcp") or []),
+            ("skill", node.get("skills") or []),
+        ):
+            for ref in refs:
+                if resources.get(kind=kind, ref=str(ref), user_id=user_id) is not None:
+                    continue
+                issues.append(
+                    {
+                        "code": "E_BINDING_MISSING",
+                        "node": node.get("id"),
+                        "message": f"节点 {node.get('id')} 的 {kind} 绑定不存在: {ref}"
+                        "（在该节点绑定里重新选择）",
+                    }
+                )
+    return issues
+
+
+def _nodes_prompt(requirement: str, available: list[dict[str, Any]] | None = None) -> str:
+    """节点清单提示词。
+
+    `available` 是用户可见的资源：只允许模型从这里挑 ref，避免臆造资源名。
+    仍可能臆造——发布期 `E_BINDING_MISSING` 会拦截并定位到具体节点。
+    """
+    parts: list[str] = []
+    mcp_refs = sorted({str(row["ref"]) for row in available or [] if row.get("kind") == "mcp"})
+    skill_refs = sorted({str(row["ref"]) for row in available or [] if row.get("kind") == "skill"})
+    if mcp_refs:
+        parts.append("mcp 候选：" + "、".join(mcp_refs))
+    if skill_refs:
+        parts.append("skill 候选：" + "、".join(skill_refs))
+    hint = ""
+    if parts:
+        hint = (
+            "可用资源（只能引用这些 ref，不要臆造）：" + "；".join(parts) + "。\n"
+            "某个节点需要与其他节点不同的工具时，在该节点上写 \"mcp\":[\"ref\"] 或 "
+            "\"skills\":[\"ref\"]；各节点共用的工具留空，由工作流级默认绑定提供。\n"
+        )
     return (
         "根据下面的需求，给出工作流节点清单。只输出 JSON：\n"
         '{"nodes":[{"id":"英文小写id","title":"中文标题",'
-        '"duty":"一句话职责","outputs":{"字段名":"str|int|bool|float"}}],'
+        '"duty":"一句话职责","outputs":{"字段名":"str|int|bool|float"},'
+        '"mcp":["ref"],"skills":["ref"]}],'
         '"edges":[{"from":"a","to":"b"}],'
         '"schedule":{"cron":"分 时 日 月 周","timezone":"Asia/Shanghai"}}\n'
         "约束：节点 2-6 个；第一个是取数/准备，最后一个是产出；边默认线性。\n"
+        f"{hint}"
         "需求里只要出现时间表达（如\"每天早上 8 点\"\"每周一 9:00\"），就必须输出 schedule；"
         "cron 五个字段依次是 分 时 日 月 周，时刻要与需求完全一致"
         "（需求说 8 点就写 8 点，不要按\"早上\"的习惯改成 9 点）；"
@@ -187,6 +246,30 @@ def _repair_prompt(plan: dict[str, Any], issues: list[dict[str, Any]]) -> str:
 def _require(condition: bool, stage: str, code: str, message: str) -> None:
     if not condition:
         raise GenerationError(stage, [{"code": code, "message": message}])
+
+
+def _refs_of(raw: Any, node_id: str, kind: str) -> list[str]:
+    """节点级绑定的 ref 归一：去空、去重、限个数。
+
+    这里只做结构收敛（没有 DB 上下文，判断不了资源是否存在）：
+    存在性由发布期 `check_bindings` 校验，并定位到具体节点。
+    """
+    if raw is None:
+        return []
+    _require(
+        isinstance(raw, list),
+        "nodes",
+        "E_NODE_BINDING",
+        f"{node_id} 的 {kind} 必须是数组",
+    )
+    refs = list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+    _require(
+        len(refs) <= NODE_BINDING_LIMIT,
+        "nodes",
+        "E_NODE_BINDING",
+        f"{node_id} 的 {kind} 绑定 {len(refs)} 个，超过上限 {NODE_BINDING_LIMIT}",
+    )
+    return refs
 
 
 def _normalize_plan(
@@ -226,8 +309,8 @@ def _normalize_plan(
                 "title": str(item.get("title") or node_id),
                 "duty": str(item.get("duty") or "").strip(),
                 "outputs": {str(k): str(v) for k, v in outputs.items()},
-                "mcp": [str(x) for x in (item.get("mcp") or [])],
-                "skills": [str(x) for x in (item.get("skills") or [])],
+                "mcp": _refs_of(item.get("mcp"), node_id, "mcp"),
+                "skills": _refs_of(item.get("skills"), node_id, "skill"),
                 # 空串 = 用平台默认 workspace_write
                 "capability": capability,
             }
@@ -295,9 +378,9 @@ def _build_manifest(
                 "system": f"prompts/{node['id']}.system.md",
                 # 契约由 outputs 内联表达（执行器就是这么读的），不额外产出 contracts/ 文件
                 "outputs": node["outputs"],
-                # 节点级工具字段已废弃：工具绑定在工作流上，见 manifest["bindings"]
-                "mcp": [],
-                "skills": [],
+                # 节点级工具绑定：只影响该节点；空表示完全继承工作流级 bindings
+                "mcp": list(node.get("mcp") or []),
+                "skills": list(node.get("skills") or []),
                 # 权限档位与执行方式解耦：agent 节点也要能往 workspace/artifacts 落文件。
                 # 隔离交给 harness 的 workspace-write：可写范围限于工作目录，prompts/contracts
                 # 不在其中，因此默认给 workspace_write 不等于放权；节点可用 capability 收紧到 read_only
@@ -338,10 +421,12 @@ def _write_package(
             f"# {node['title']}\n\n职责：{node['duty']}\n\n已确认需求：\n{requirement}\n"
         )
         (draft / f"prompts/{node['id']}.md").write_text(body, encoding="utf-8")
-        (draft / f"prompts/{node['id']}.system.md").write_text(
-            "你是一个只负责本节点职责的执行者；按契约输出 result 块，不解释过程。\n",
-            encoding="utf-8",
-        )
+        # 用户改过系统词就落用户的版本，没改才写默认模板；
+        # 单调性要求：同一份草稿反复重建包，这两个文件的字节必须一致（否则 hash 会漂）
+        system_body = node.get("system")
+        if system_body is None:
+            system_body = "你是一个只负责本节点职责的执行者；按契约输出 result 块，不解释过程。\n"
+        (draft / f"prompts/{node['id']}.system.md").write_text(system_body, encoding="utf-8")
     (draft / "ui/pages/main.json").write_text(
         json.dumps({"page": "main", "nodes": [n["id"] for n in nodes]}, ensure_ascii=False)
         + "\n",
@@ -393,7 +478,10 @@ async def generate(
         done(1, "clarify", {"questions": questions})
 
         # 2 节点清单（唯一调用模型的步骤）
-        plan = await model.generate(step="nodes", prompt=_nodes_prompt(requirement))
+        plan = await model.generate(
+            step="nodes",
+            prompt=_nodes_prompt(requirement, _available_for(session["user_id"])),
+        )
         nodes, edges, triggers = _normalize_plan(plan)
         done(2, "nodes", {"nodes": [n["id"] for n in nodes]})
 
@@ -548,7 +636,10 @@ async def prepare(
         questions = _clarify(context)
         done(1, "clarify", {"questions": questions})
 
-        plan = await model.generate(step="nodes", prompt=_nodes_prompt(requirement))
+        plan = await model.generate(
+            step="nodes",
+            prompt=_nodes_prompt(requirement, _available_for(session["user_id"])),
+        )
         nodes, edges, triggers = _normalize_plan(plan)
         done(2, "nodes", {"nodes": [n["id"] for n in nodes]})
 
@@ -654,6 +745,8 @@ async def update_draft(
                 overlap_policy=schedule.get("overlap_policy", "skip"),
             )
         )
+    if not issues:
+        issues.extend(_check_draft_node_bindings(draft, user_id=session["user_id"]))
     if issues:
         result.stage = "draft"
         result.issues = issues

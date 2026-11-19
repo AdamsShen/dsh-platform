@@ -157,7 +157,11 @@ async def agent(
     mcp: list[str] | None = None,
     skills: list[str] | None = None,
 ) -> str:
-    """一次 harness turn。返回原始文本，契约解析交给 `parse_contract`。"""
+    """一次 harness turn。返回原始文本，契约解析交给 `parse_contract`。
+
+    `mcp` / `skills` 只在显式传参时才算"本 turn 覆盖"：不传就交给执行器按节点绑定解析。
+    不能在 SDK 里回落到 `ctx.mcp`，否则每个 turn 都会带着工作流级默认值覆盖节点级绑定。
+    """
     ctx = current_context()
     if ctx.runtime is None:
         raise RuntimeError("没有执行器，agent() 不可用")
@@ -166,8 +170,8 @@ async def agent(
         ctx,
         prompt=text,
         vars=dict(vars if vars is not None else ctx.vars),
-        mcp=list(mcp if mcp is not None else ctx.mcp),
-        skills=list(skills if skills is not None else ctx.skills),
+        mcp=list(mcp) if mcp is not None else None,
+        skills=list(skills) if skills is not None else None,
     )
 
 

@@ -153,7 +153,12 @@ def create_app() -> FastAPI:
                     "title": form.get(f"title_{node_id}"),
                     "duty": form.get(f"duty_{node_id}"),
                     "prompt": form.get(f"prompt_{node_id}"),
+                    "system": form.get(f"system_{node_id}"),
                     "outputs": outputs,
+                    # 未勾选 = 该节点不绑定（不是"继承"，继承由不提交字段表达；
+                    # 页面永远是全量勾选视图，所以这里必须按"当前勾选即真相"处理）
+                    "mcp": [str(item) for item in form.getlist(f"mcp_{node_id}")],
+                    "skills": [str(item) for item in form.getlist(f"skills_{node_id}")],
                 }
             )
         return edits

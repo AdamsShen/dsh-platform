@@ -19,8 +19,13 @@ from ao.cron import validate_cron
 from ao.settings import settings
 
 #: 允许人在草稿里改的字段；id/kind 不可改（改了边就全废，且不利于回溯）
-EDITABLE_FIELDS = ("title", "duty", "outputs", "prompt")
+#: system / mcp / skills 是 P6 新增：系统词进编辑面，工具绑定下沉到节点
+EDITABLE_FIELDS = ("title", "duty", "outputs", "prompt", "system", "mcp", "skills")
 OUTPUT_TYPES = {"str", "int", "bool", "float"}
+#: 系统词长度上限：只做防呆，不做内容审查（内容安全由输入中和与执行期兜）
+SYSTEM_MAX_CHARS = 4000
+#: 与 manifest.validate_graph 的上限保持一致：这里先给出可读报错，manifest 再兜底校验
+NODE_BINDING_LIMIT = 8
 
 
 def draft_dir(session_id: str) -> Path:
@@ -103,6 +108,41 @@ def apply_edits(draft: Draft, edits: list[dict[str, Any]]) -> list[dict[str, Any
         prompt = edit.get("prompt")
         if prompt is not None:
             node["prompt"] = str(prompt)
+        system = edit.get("system")
+        if system is not None:
+            text = str(system)
+            if len(text) > SYSTEM_MAX_CHARS:
+                issues.append(
+                    {
+                        "code": "E_SYSTEM_LEN",
+                        "message": f"{node_id} 的系统词超过 {SYSTEM_MAX_CHARS} 字",
+                    }
+                )
+            elif text.strip():
+                node["system"] = text
+            else:
+                # 清空 = 回到生成器默认系统词（重新构建包时会写回默认模板）
+                node.pop("system", None)
+        for field_name in ("mcp", "skills"):
+            if field_name not in edit:
+                continue
+            raw = edit.get(field_name)
+            if not isinstance(raw, list):
+                issues.append(
+                    {"code": "E_NODE_BINDING", "message": f"{node_id} 的 {field_name} 必须是数组"}
+                )
+                continue
+            refs = list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+            if len(refs) > NODE_BINDING_LIMIT:
+                issues.append(
+                    {
+                        "code": "E_NODE_BINDING",
+                        "message": f"{node_id} 的 {field_name} 绑定 {len(refs)} 个，"
+                        f"超过上限 {NODE_BINDING_LIMIT}",
+                    }
+                )
+                continue
+            node[field_name] = refs
         outputs = edit.get("outputs")
         if outputs is not None:
             if not isinstance(outputs, dict):
@@ -206,13 +246,20 @@ def _int_in(raw: Any, default: int, *, low: int, high: int) -> int:
 
 
 def editable_view(draft: Draft) -> list[dict[str, Any]]:
-    """页面用的节点视图：只暴露可编辑字段与只读的标识信息。"""
+    """页面用的节点视图：只暴露可编辑字段与只读的标识信息。
+
+    提示词 / 系统词优先读草稿里的正文，没有才读包内文件——生成器写的文件是产物，
+    用户一旦编辑，草稿才是真值。
+    """
     view = []
     for node in draft.nodes:
-        prompt_file = draft_dir(draft.session_id) / f"prompts/{node['id']}.md"
+        base = draft_dir(draft.session_id) / "prompts"
         prompt_text = node.get("prompt")
-        if prompt_text is None and prompt_file.exists():
-            prompt_text = prompt_file.read_text(encoding="utf-8")
+        if prompt_text is None and (base / f"{node['id']}.md").exists():
+            prompt_text = (base / f"{node['id']}.md").read_text(encoding="utf-8")
+        system_text = node.get("system")
+        if system_text is None and (base / f"{node['id']}.system.md").exists():
+            system_text = (base / f"{node['id']}.system.md").read_text(encoding="utf-8")
         view.append(
             {
                 "id": node["id"],
@@ -221,6 +268,9 @@ def editable_view(draft: Draft) -> list[dict[str, Any]]:
                 "duty": node.get("duty") or "",
                 "outputs": dict(node.get("outputs") or {}),
                 "prompt": prompt_text or "",
+                "system": system_text or "",
+                "mcp": list(node.get("mcp") or []),
+                "skills": list(node.get("skills") or []),
             }
         )
     return view

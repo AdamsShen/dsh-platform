@@ -24,7 +24,8 @@ from ao.db import fetch_one, read, tx
 from ao.gateway import gateway_root
 from ao.harness.base import Provider, Reply
 from ao.harness.mock import MockProvider
-from ao.manifest import Manifest, Node, eval_when, parse
+from ao.input_guard import InputGuardError, sanitize_inputs
+from ao.manifest import Binding, Manifest, Node, eval_when, parse
 from ao.package import Package, load_package
 from ao.settings import settings
 from wf_sdk.runtime import GraphSpec, RunEnv, reset_run_env, set_run_env
@@ -93,10 +94,14 @@ class RunRuntime:
         self.current_node: Node | None = None
         self.budget_usd = float(run.get("budget_usd") or 0)
         self.spent_usd = float(run.get("spent_usd") or 0)
-        # 工作流级绑定：MCP 配置在这里解析一次，所有 agent 节点共享；
-        # 发布期已校验，这里再解析是兜底（资源可能发布后被下架）
+        self.user_id = run.get("trigger_user_id")
+        # 节点级工具集缓存：key 是节点 id，value 是 (mcp_servers, skill_refs)。
+        # 一个节点可能跑多个 turn（重试 / repair），解析一次即可；不同节点互不影响。
+        self._tool_cache: dict[str, tuple[dict[str, Any], list[str]]] = {}
+        # 工作流级默认工具集：作为 RunEnv / ctx.mcp 的兜底视图，真正注入 harness 的工具集
+        # 由 _tools_for() 按节点解析。发布期已校验，这里再解析是兜底（资源可能发布后被下架）
         self.mcp_servers, self.skill_refs, skipped = resources.resolve_bindings(
-            manifest.effective_bindings(), user_id=run.get("trigger_user_id")
+            manifest.effective_bindings(), user_id=self.user_id
         )
         if skipped:
             logger.warning("绑定不可用，已跳过: %s", skipped)
@@ -217,6 +222,11 @@ class RunRuntime:
         self.native_id = None
         node = self.manifest.node(spec.id)
         self.current_node = node
+        # ctx.mcp / ctx.skills 是 SDK 侧的只读视图：必须与真正注入 harness 的工具集一致，
+        # 否则 DSL 读 ctx.mcp 会看到工作流级默认值，与节点级绑定的实际行为不符
+        servers, skill_refs = self._tools_for(node)
+        ctx.mcp = sorted(servers)
+        ctx.skills = list(skill_refs)
         # 同机接管才 resume；跨机 session 文件不在本地，重跑当前节点
         resume_native = None
         with read() as conn:
@@ -322,20 +332,110 @@ class RunRuntime:
         with tx() as conn:
             events.emit(conn, self.run_id, event, node_id=ctx.node_id, payload=payload)
 
+    def _emit_run_event(
+        self, event: str, *, node_id: str | None, payload: dict[str, Any]
+    ) -> None:
+        """落一条 run 事件；失败只记日志——留痕不能反过来把节点搞挂。"""
+        try:
+            with tx() as conn:
+                events.emit(conn, self.run_id, event, node_id=node_id, payload=payload)
+        except Exception:  # noqa: BLE001 — 事件写不进去不影响执行结果
+            logger.debug("事件落库失败: %s node=%s", event, node_id, exc_info=True)
+
+    def _tools_for(self, node: Node | None) -> tuple[dict[str, Any], list[str]]:
+        """节点实际可用的 (mcp_servers, skill_refs)，按节点缓存。
+
+        解析来源是 `manifest.bindings_for_node()`（工作流级默认 + 节点级覆盖），
+        不是全 run 一次的 `effective_bindings()`——后者会让所有节点共用一套工具。
+        """
+        if node is None:
+            return dict(self.mcp_servers), list(self.skill_refs)
+        cached = self._tool_cache.get(node.id)
+        if cached is not None:
+            return cached
+        servers, skills, skipped = resources.resolve_bindings(
+            self.manifest.bindings_for_node(node), user_id=self.user_id
+        )
+        if skipped:
+            # 必须带 node_id：否则线上只能看到"某个绑定不可用"，定位不到哪个节点
+            for item in skipped:
+                item["node"] = node.id
+            logger.warning("节点 %s 的绑定不可用，已跳过: %s", node.id, skipped)
+            self._emit_run_event(
+                "binding.skipped", node_id=node.id, payload={"items": skipped}
+            )
+        self._tool_cache[node.id] = (servers, skills)
+        # 每节点一条：这是"这个节点到底用了哪些工具"的唯一可审计来源
+        self._emit_run_event(
+            "binding.resolved",
+            node_id=node.id,
+            payload={"mcp": sorted(servers), "skills": skills},
+        )
+        return servers, skills
+
+    def _tools_for_turn(
+        self, ctx: Any, mcp: list[str] | None, skills: list[str] | None
+    ) -> tuple[dict[str, Any], list[str]]:
+        """本 turn 的工具集：节点绑定为底，DSL 显式传参作为该 turn 的临时覆盖。
+
+        `agent(mcp=[...])` 以前被 `call_agent` 丢弃，这里才真正生效；
+        覆盖只作用于当前 turn，不写缓存，也不影响同 run 其他节点。
+        """
+        servers, skill_refs = self._tools_for(self.manifest.node(ctx.node_id))
+        if mcp is None and skills is None:
+            return servers, skill_refs
+        skipped: list[dict[str, Any]] = []
+        if mcp is not None:
+            servers, _, lost = resources.resolve_bindings(
+                [Binding(kind="mcp", ref=str(ref)) for ref in mcp], user_id=self.user_id
+            )
+            skipped.extend(lost)
+        if skills is not None:
+            _, skill_refs, lost = resources.resolve_bindings(
+                [Binding(kind="skill", ref=str(ref)) for ref in skills], user_id=self.user_id
+            )
+            skipped.extend(lost)
+        if skipped:
+            self._emit_run_event(
+                "binding.skipped",
+                node_id=ctx.node_id,
+                payload={"items": skipped, "source": "dsl"},
+            )
+        self._emit_run_event(
+            "binding.override",
+            node_id=ctx.node_id,
+            payload={"mcp": mcp, "skills": skills},
+        )
+        return servers, skill_refs
+
     async def call_agent(
         self,
         ctx: Any,
         *,
         prompt: str,
         vars: dict[str, Any],  # noqa: A002 — 与生成代码参数名保持一致
-        mcp: list[str],
-        skills: list[str],
+        mcp: list[str] | None = None,
+        skills: list[str] | None = None,
     ) -> str:
-        return await self._turn(ctx, prompt=prompt, repair=False)
+        return await self._turn(ctx, prompt=prompt, repair=False, mcp=mcp, skills=skills)
 
-    async def _turn(self, ctx: Any, *, prompt: str, repair: bool) -> str:
+    async def _turn(
+        self,
+        ctx: Any,
+        *,
+        prompt: str,
+        repair: bool,
+        mcp: list[str] | None = None,
+        skills: list[str] | None = None,
+    ) -> str:
         node = self.manifest.node(ctx.node_id)
         timeout = float(node.timeout if node else 600)
+        # 本 turn 的工具集：节点绑定为底，DSL 显式传参临时覆盖（P6-T02/T03）
+        servers, skill_refs = self._tools_for_turn(ctx, mcp, skills)
+        # harness 的 cwd 就是包根，会在那里自动加载 AGENTS.md / CLAUDE.md 等文件。
+        # 包由模型生成，若把这类文件留在包根，下一轮 turn 会被当作指令读入（自我注入），
+        # 因此每次调用 harness 前先清一遍；删不掉按 fail closed 处理。
+        sanitize_inputs(self.package.root)
         # system 序言由 provider 拼接，且必须留痕（见设计 §7.2）
         system = ctx.system()
         # 网关模式：本 turn 签一个虚拟 key。预算由网关按 key 硬限（超了 402），
@@ -357,9 +457,9 @@ class RunRuntime:
                     "capability": getattr(node, "capability", "read_only"),
                     "cwd": str(self.package.root),
                     "timeout": timeout,
-                    # 工作流级工具：provider 侧把它们拼进 harness 的 MCP 补丁
-                    "mcp_servers": self.mcp_servers,
-                    "skills": self.skill_refs,
+                    # 本节点（或本 turn 的 DSL 覆盖）工具集：provider 侧拼进 harness 的 MCP 补丁
+                    "mcp_servers": servers,
+                    "skills": skill_refs,
                     # provider 用这两个覆盖全局 base_url/api_key（None 表示直连）
                     "api_key": virtual.key if virtual else None,
                     "gateway_base_url": gateway_root() if virtual else None,
@@ -513,6 +613,9 @@ def classify(exc: BaseException) -> str:
     from ao.vars import VarError
     from wf_sdk import ContractError
 
+    if isinstance(exc, InputGuardError):
+        # 输入中和失败属于安全拒绝，重试也不会变好（sandbox_denied 在 NO_RETRY 里）
+        return "sandbox_denied"
     if isinstance(exc, BudgetExceeded):
         return "budget_exceeded"
     if isinstance(exc, VarError):

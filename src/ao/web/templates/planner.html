@@ -84,7 +84,9 @@
       <h2>草稿节点 <small>共 {{ nodes | length }} 个</small></h2>
       {% for node in nodes %}
       <details class="node" {% if loop.first %}open{% endif %}>
-        <summary><code>{{ node.id }}</code> · {{ node.title }}</summary>
+        <summary><code>{{ node.id }}</code> · {{ node.title }}
+          <small>{{ node.mcp | length }} MCP · {{ node.skills | length }} Skill</small>
+        </summary>
         <label>标题
           <input type="text" name="title_{{ node.id }}" value="{{ node.title }}" required>
         </label>
@@ -94,9 +96,44 @@
         <label>输出字段（JSON，类型限 str/int/bool/float）
           <input type="text" name="outputs_{{ node.id }}" value="{{ node.outputs | tojson }}">
         </label>
-        <label>提示词
+        <label>提示词（支持 Jinja2 变量）
           <textarea name="prompt_{{ node.id }}" rows="6">{{ node.prompt }}</textarea>
         </label>
+        <label>系统词（节点序言，最多 4000 字；留空用平台默认）
+          <textarea name="system_{{ node.id }}" rows="4">{{ node.system }}</textarea>
+        </label>
+        <fieldset>
+          <legend>MCP <small>只作用于该节点；下方「工具绑定」是各节点的默认集</small></legend>
+          <div class="bindings">
+            {% for item in available if item.kind == 'mcp' %}
+            <label class="check">
+              <input type="checkbox" name="mcp_{{ node.id }}" value="{{ item.ref }}"
+                {% if item.ref in node.mcp %}checked{% endif %}>
+              <span>{{ item.name }}</span>
+              <code>{{ item.ref }}</code>
+              <em>{{ '私有' if item.scope == 'private' else '全局' }}</em>
+            </label>
+            {% else %}
+            <p class="empty">没有可用的 MCP 资源</p>
+            {% endfor %}
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Skill <small>只作用于该节点</small></legend>
+          <div class="bindings">
+            {% for item in available if item.kind == 'skill' %}
+            <label class="check">
+              <input type="checkbox" name="skills_{{ node.id }}" value="{{ item.ref }}"
+                {% if item.ref in node.skills %}checked{% endif %}>
+              <span>{{ item.name }}</span>
+              <code>{{ item.ref }}</code>
+              <em>{{ '私有' if item.scope == 'private' else '全局' }}</em>
+            </label>
+            {% else %}
+            <p class="empty">没有可用的 Skill 资源</p>
+            {% endfor %}
+          </div>
+        </fieldset>
       </details>
       {% endfor %}
       <div class="row">
