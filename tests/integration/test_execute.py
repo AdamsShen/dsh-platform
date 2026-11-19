@@ -82,13 +82,14 @@ async def test_contract_failure_repairs_once_then_fails(monkeypatch: pytest.Monk
         (run_id,),
     )
     assert node["status"] == "failed"
-    assert node["repair_count"] == 1
+    # 阶段内多轮：首轮 + 2 次续轮（默认 stage_max_turns=3）用尽才判失败
+    assert node["repair_count"] == 2
     assert "contract_error" in node["error"]
 
     repairs = fetch_all(
         "SELECT payload FROM run_events WHERE run_id = %s AND type = 'node.repair'", (run_id,)
     )
-    assert len(repairs) == 1
+    assert len(repairs) == 2
 
 
 @pytest.mark.integration
@@ -190,3 +191,40 @@ async def test_missing_var_retries_then_fails() -> None:
     )
     assert failed
     assert any("u_999" in str(item["payload"]) for item in failed)
+
+
+@pytest.mark.integration
+async def test_cross_stage_fresh_session_and_in_stage_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """会话边界：跨阶段一律新会话（native_id=None），阶段内 repair 续同一会话。
+
+    同时验证跨阶段交接：第二个阶段的 prompt 里有上游产物，而不是靠会话历史。
+    """
+    import ao.executor as executor_mod
+    from ao.harness.mock import MockProvider
+
+    monkeypatch.delenv("AO_FAIL_NODE", raising=False)
+    provider = MockProvider(delay=0.0)
+    monkeypatch.setattr(executor_mod, "current_provider", lambda: provider)
+
+    run_id = publish({"user_id": "u_003", "name": "阿澈"}, "w3")
+    assert await execute(run_id) == "succeeded"
+
+    first_turn = {
+        call["node_id"]: call for call in provider.calls if "#summary" not in call["node_id"]
+    }
+    assert first_turn["draft"]["native_id"] is None
+    assert first_turn["finalize"]["native_id"] is None
+    assert "上游阶段产物" in first_turn["finalize"]["prompt"]
+
+    # 同一节点内不合格 → 第二轮必须带上一轮的 native_id
+    monkeypatch.setenv("AO_FAIL_NODE", "draft")
+    retry_provider = MockProvider(delay=0.0)
+    monkeypatch.setattr(executor_mod, "current_provider", lambda: retry_provider)
+    bad_run = publish({"user_id": "u_001", "name": "小林"}, "w4")
+    assert await execute(bad_run) == "failed"
+
+    draft_calls = [call for call in retry_provider.calls if call["node_id"] == "draft"]
+    assert draft_calls[0]["native_id"] is None
+    assert draft_calls[1]["native_id"] == "mock-draft-0"

@@ -89,7 +89,9 @@ def test_normalize_spend_prefers_request_metadata() -> None:
 
 async def test_sync_backfills_attribution_from_key_token() -> None:
     _bind()
-    inserted = await sync_spend_logs(start="2026-11-14", end="2026-11-14", gateway=FakeGateway([_spend_row()]))
+    inserted = await sync_spend_logs(
+        start="2026-11-14", end="2026-11-14", gateway=FakeGateway([_spend_row()])
+    )
     assert inserted == 1
 
     rows = fetch_all(

@@ -17,7 +17,9 @@ from typing import Any
 from ao.settings import settings
 from ao.util import canonical_json
 
-REQUIRED_FILES = ("manifest.json", "graph.py")
+#: 冻结包的唯一必需文件。`graph.py` 已退化为历史产物，不再参与执行（见 ADR-006），
+#: 因此老包带它也不影响加载，新包不再生成。
+REQUIRED_FILES = ("manifest.json",)
 S3_PREFIX = "s3://"
 
 
@@ -34,6 +36,7 @@ class Package:
 
     @property
     def graph_path(self) -> Path:
+        """历史 `graph.py` 路径；仅用于兼容旧包的哈希/展示，运行期不再加载。"""
         return self.root / "graph.py"
 
     def path(self, relative: str) -> Path:

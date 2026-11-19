@@ -85,8 +85,8 @@ async def publish(
     if missing:
         return PublishResult(ok=False, stage="files", issues=missing)
 
-    # 4. AST 白名单 + 节点/边一致性
-    issues = static_check.check_file(package.graph_path, manifest)
+    # 4. 声明自洽性（graph.py 已不参与执行，检查对象换成 manifest + prompts 模板）
+    issues = static_check.check_manifest(manifest, package.root)
     if issues:
         return PublishResult(
             ok=False, stage="static", issues=[issue.as_dict() for issue in issues]

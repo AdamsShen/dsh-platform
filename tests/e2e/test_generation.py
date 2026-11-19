@@ -109,7 +109,8 @@ async def test_generation_runs_seven_steps_and_publishes(isolated_dirs: Path) ->
     for node in manifest["nodes"]:
         assert (package.root / node["prompt"]).exists()
         assert (package.root / node["system"]).exists()
-    assert (package.root / "graph.py").exists()
+    # 声明化：不再生成可执行 graph.py，运行期只读 manifest
+    assert not (package.root / "graph.py").exists()
 
     # 第 ④ 步必须产出真 Schema（不是节点 id 占位）并编译成静态页
     page = json.loads((package.root / "ui/pages/main.json").read_text(encoding="utf-8"))
@@ -149,7 +150,7 @@ async def test_static_check_failure_keeps_draft_and_blocks_publish(
         def as_dict(self) -> dict[str, Any]:
             return {"code": "E_IMPORT", "message": "禁止 import os", "line": 3}
 
-    monkeypatch.setattr(orchestrator.static_check, "check_file", lambda *a, **k: [FakeIssue()])
+    monkeypatch.setattr(orchestrator.static_check, "check_manifest", lambda *a, **k: [FakeIssue()])
 
     session = planner.session.create_session(tenant_id="default", user_id="u_001")
     planner.session.append_message(session["id"], "user", "每天 9:00 生成周报")
@@ -168,7 +169,6 @@ async def test_static_check_failure_keeps_draft_and_blocks_publish(
     # 草稿保留（供人下载/排查），但没有发布版本，会话也不绑定工作流
     draft = Path(result.draft_dir)
     assert (draft / "manifest.json").exists()
-    assert (draft / "graph.py").exists()
     assert planner.session.get_session(session["id"])["workflow_id"] is None
     assert (
         fetch_one(
@@ -194,7 +194,7 @@ async def test_repair_round_recovers_and_publishes(
         calls["n"] += 1
         return [FakeIssue()] if calls["n"] == 1 else []
 
-    monkeypatch.setattr(orchestrator.static_check, "check_file", flaky)
+    monkeypatch.setattr(orchestrator.static_check, "check_manifest", flaky)
 
     session = planner.session.create_session(tenant_id="default", user_id="u_001")
     planner.session.append_message(session["id"], "user", "每天 9:00 生成周报")
@@ -243,7 +243,7 @@ async def test_action_kind_is_ignored(isolated_dirs: Path) -> None:
     draft = Path(result.draft_dir)
     manifest = json.loads((draft / "manifest.json").read_text(encoding="utf-8"))
     assert [node["kind"] for node in manifest["nodes"]] == ["agent", "agent"]
-    assert "await action(" not in (draft / "graph.py").read_text(encoding="utf-8")
+    assert not (draft / "graph.py").exists()
 
     artifact = fetch_one(
         "SELECT payload FROM planner_messages WHERE session_id = %s AND role = 'artifact'"

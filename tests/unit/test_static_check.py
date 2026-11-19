@@ -6,7 +6,10 @@ from ao.static_check import check_source
 MANIFEST = parse(
     {
         "id": "wf",
-        "nodes": [{"id": "draft", "outputs": {"text": "str"}}, {"id": "save", "outputs": {"ok": "bool"}}],
+        "nodes": [
+            {"id": "draft", "outputs": {"text": "str"}},
+            {"id": "save", "outputs": {"ok": "bool"}},
+        ],
         "edges": [{"from": "draft", "to": "save"}],
     }
 )

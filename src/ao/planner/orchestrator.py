@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from ao import codegen, resources, static_check
+from ao import resources, static_check
 from ao import triggers as trigger_store
 from ao.cron import validate_cron
 from ao.manifest import NODE_BINDING_LIMIT, parse
@@ -544,18 +544,18 @@ async def generate(
                     attempt=attempt,
                 )
 
-                (draft / "graph.py").write_text(codegen.generate_graph(parsed), encoding="utf-8")
                 page_files = _materialize_page(
                     draft, workflow_id=workflow_id, title=f"{session['user_id']} 的工作流"
                 )
                 done(
                     4,
+                    # 阶段名沿用 graph：它是"图与页面就绪"的语义，不再产出可执行代码
                     "graph",
-                    {"files": ["graph.py", "ui/pages/main.json", *page_files]},
+                    {"files": ["ui/pages/main.json", *page_files]},
                     attempt=attempt,
                 )
 
-                issues = static_check.check_file(draft / "graph.py", parsed)
+                issues = static_check.check_manifest(parsed, draft)
                 if issues:
                     raise GenerationError("static", [issue.as_dict() for issue in issues])
                 done(5, "static", {"issues": []}, attempt=attempt)
@@ -706,18 +706,17 @@ async def prepare(
                     attempt=attempt,
                 )
 
-                (target / "graph.py").write_text(codegen.generate_graph(parsed), encoding="utf-8")
                 page_files = _materialize_page(
                     target, workflow_id=workflow_id, title=f"{session['user_id']} 的工作流"
                 )
                 done(
                     4,
                     "graph",
-                    {"files": ["graph.py", "ui/pages/main.json", *page_files]},
+                    {"files": ["ui/pages/main.json", *page_files]},
                     attempt=attempt,
                 )
 
-                problems = static_check.check_file(target / "graph.py", parsed)
+                problems = static_check.check_manifest(parsed, target)
                 if problems:
                     raise GenerationError("static", [issue.as_dict() for issue in problems])
                 done(5, "static", {"issues": []}, attempt=attempt)
@@ -815,8 +814,7 @@ async def update_draft(
             raise GenerationError(
                 "package", [{"code": "E_MANIFEST", "message": str(exc)}]
             ) from exc
-        (target / "graph.py").write_text(codegen.generate_graph(parsed), encoding="utf-8")
-        problems = static_check.check_file(target / "graph.py", parsed)
+        problems = static_check.check_manifest(parsed, target)
         if problems:
             raise GenerationError("static", [issue.as_dict() for issue in problems])
     except GenerationError as exc:
@@ -870,7 +868,7 @@ async def publish_draft(
                 "package", [{"code": "E_MANIFEST", "message": str(exc)}]
             ) from exc
 
-        problems = static_check.check_file(target / "graph.py", manifest)
+        problems = static_check.check_manifest(manifest, target)
         if problems:
             raise GenerationError("static", [issue.as_dict() for issue in problems])
 

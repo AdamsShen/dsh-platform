@@ -134,14 +134,14 @@
 
 ---
 
-### M5 · 执行隔离（P1-T13，5–7 人日）→ 需求 #7
+### M5 · ~~执行隔离（P1-T13，5–7 人日）~~ → 已于 2026-11-19 取消
 
-| W | 任务 | 验收 | 估时 |
-|---|---|---|---|
-| W50 | `graph.py` 子进程化：`multiprocessing`/`subprocess` 加载冻结包，父进程 pipe 收事件；子进程死不影响 worker | 子进程内 `os.environ` 读不到上游 key；子进程被杀 run 仍可被接管 | 3–4d |
-| W51 | 只读挂载 + 最小环境变量白名单 + 进程组 `killpg` | 写 `/etc`、写 `$HOME` 失败；`pgrep -f <run_id>` 为空 | 2–3d |
+| W | 任务 | 结论 |
+|---|---|---|
+| W50 | `graph.py` 子进程化 | **作废**：ADR-006 把 `graph.py` 声明化，运行期不再加载生成代码，没有可隔离对象 |
+| W51 | 只读挂载 + 环境变量白名单 | **作废**：同上；这两条只在"保留可执行 graph.py"的支线下才需要 |
 
-**门禁**：新增 `tests/e2e/test_graph_isolation.py`；`docs/reports/2026-11-14-sandbox-matrix.md` 结论更新（容器 vs 裸机两套启动参数）。
+**替代方案**：`docs/decisions/ADR-006-declarative-graph.md`——每阶段一个新 harness 会话、阶段内多轮 resume、跨阶段文件化记忆（`memory.md` + 产物索引），生成与执行都在 DSH 沙箱内。
 
 ---
 

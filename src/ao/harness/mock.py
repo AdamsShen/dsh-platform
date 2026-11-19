@@ -54,7 +54,15 @@ class MockProvider:
     ) -> Reply:
         await asyncio.sleep(self.delay)
         self.calls.append(
-            {"run_id": run_id, "node_id": node_id, "attempt": attempt, "repair": repair}
+            {
+                "run_id": run_id,
+                "node_id": node_id,
+                "attempt": attempt,
+                "repair": repair,
+                # 用于验证会话边界：首轮应为 None，阶段内 repair 应带上轮次的 native_id
+                "native_id": native_id,
+                "prompt": prompt,
+            }
         )
 
         if node_id in self.fail_nodes:

@@ -375,10 +375,10 @@ async def test_three_nodes_with_distinct_tools_run_through_langgraph(
     published = await orchestrator.publish_draft(session["id"], prepared=prepared)
     assert published.ok, published.issues
 
-    # ① 产物仍是 wf_sdk DSL，由执行器编译成 StateGraph
-    graph_text = (draft_store.draft_dir(session["id"]) / "graph.py").read_text(encoding="utf-8")
-    assert "G = graph(nodes=[" in graph_text
-    assert "StateGraph" not in graph_text  # 生成物不直接写 LangGraph，编译在 executor
+    # ① 产物是声明式 manifest，运行期由执行器直接构图（已无 graph.py）
+    draft_dir = draft_store.draft_dir(session["id"])
+    assert (draft_dir / "manifest.json").exists()
+    assert not (draft_dir / "graph.py").exists()
 
     # ② 每个节点的工具集不同
     manifest = manifest_mod.parse(

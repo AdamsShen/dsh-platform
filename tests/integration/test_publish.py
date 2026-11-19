@@ -36,18 +36,16 @@ async def test_publish_happy_path(workspace: Path) -> None:
 
 
 @pytest.mark.integration
-async def test_publish_rejects_node_mismatch(workspace: Path) -> None:
-    graph = workspace / "graph.py"
-    graph.write_text(
-        graph.read_text(encoding="utf-8").replace(
-            'edges=[{"from": "draft", "to": "finalize"}]', "edges=[]"
-        ),
-        encoding="utf-8",
-    )
+async def test_publish_rejects_unknown_edge(workspace: Path) -> None:
+    """声明化后 manifest 就是真值：边指向不存在的节点在解析阶段就该拦住。"""
+    path = workspace / "manifest.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["edges"] = [{"from": "draft", "to": "ghost"}]
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     result = await publish(workspace, smoke=False)
     assert not result.ok
-    assert result.stage == "static"
-    assert {i["code"] for i in result.issues} == {"E_GRAPH_MISMATCH"}
+    assert result.stage == "manifest"
+    assert "E_MANIFEST" in {i["code"] for i in result.issues}
 
 
 @pytest.mark.integration
@@ -59,13 +57,14 @@ async def test_publish_rejects_missing_prompt(workspace: Path) -> None:
 
 
 @pytest.mark.integration
-async def test_publish_rejects_undeclared_import(workspace: Path) -> None:
-    graph = workspace / "graph.py"
-    graph.write_text("import os\n" + graph.read_text(encoding="utf-8"), encoding="utf-8")
+async def test_publish_rejects_bad_prompt_template(workspace: Path) -> None:
+    """可执行代码已不存在，模板就是唯一会"执行"的东西：语法错必须拦在发布前。"""
+    prompt = workspace / "prompts" / "finalize.md"
+    prompt.write_text("{% if %}\n坏了\n", encoding="utf-8")
     result = await publish(workspace, smoke=False)
     assert not result.ok
     assert result.stage == "static"
-    assert "E_IMPORT" in {i["code"] for i in result.issues}
+    assert "E_PROMPT_SYNTAX" in {i["code"] for i in result.issues}
 
 
 @pytest.mark.integration

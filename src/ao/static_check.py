@@ -10,6 +10,8 @@ import ast
 from dataclasses import dataclass
 from typing import Any
 
+from jinja2 import Environment, TemplateSyntaxError
+
 from ao.manifest import Manifest
 
 ALLOWED_IMPORTS = {"wf_sdk", "typing", "json", "datetime", "re"}
@@ -176,3 +178,63 @@ def check_file(path: Any, manifest: Manifest) -> list[Issue]:
     from pathlib import Path
 
     return check_source(Path(path).read_text(encoding="utf-8"), manifest)
+
+
+def check_manifest(manifest: Manifest, root: Any = None) -> list[Issue]:
+    """发布前检查声明式工作流（graph.py 已不再参与执行，检查对象换成 manifest）。
+
+    只查"声明本身是否自洽"，不查业务正确性：
+    - 节点 id 重复、边指向不存在的节点、自环；
+    - `when` 表达式语法（运行期由 `eval_when` 求值，语法错必须提前暴露）；
+    - `prompts/<id>.md` 存在且 Jinja 语法可解析（模板坏了运行期才炸就太晚）。
+
+    传 `root` 时才做文件级检查；只校验内存里的 manifest 时传 None。
+    """
+    from pathlib import Path
+
+    issues: list[Issue] = []
+    seen: set[str] = set()
+    for node in manifest.nodes:
+        if node.id in seen:
+            issues.append(Issue("E_NODE_DUP", f"节点 id 重复: {node.id}", 0))
+        seen.add(node.id)
+
+    ids = {node.id for node in manifest.nodes}
+    for edge in manifest.edges:
+        if edge.src not in ids:
+            issues.append(Issue("E_EDGE_UNKNOWN", f"边起点不存在: {edge.src}", 0))
+        if edge.dst not in ids:
+            issues.append(Issue("E_EDGE_UNKNOWN", f"边终点不存在: {edge.dst}", 0))
+        if edge.src == edge.dst:
+            issues.append(Issue("E_EDGE_SELF", f"自环没有意义: {edge.src}", 0))
+
+    for node in manifest.nodes:
+        if node.when:
+            try:
+                compile(node.when, "<when>", "eval")
+            except SyntaxError as exc:
+                issues.append(
+                    Issue("E_WHEN", f"节点 {node.id} 的 when 语法错误: {exc.msg}", 0)
+                )
+
+    if root is not None:
+        base = Path(root)
+        env = Environment()  # noqa: S701 — 只做语法解析，不渲染用户输入
+        for node in manifest.nodes:
+            for label, relative in (("prompt", f"prompts/{node.id}.md"),
+                                    ("system", f"prompts/{node.id}.system.md")):
+                path = base / relative
+                if label == "prompt" and not path.exists():
+                    issues.append(
+                        Issue("E_PROMPT_MISSING", f"节点 {node.id} 缺少 {relative}", 0)
+                    )
+                    continue
+                if not path.exists():
+                    continue
+                try:
+                    env.parse(path.read_text(encoding="utf-8"))
+                except TemplateSyntaxError as exc:
+                    issues.append(
+                        Issue("E_PROMPT_SYNTAX", f"{relative} 模板语法错误: {exc.message}", 0)
+                    )
+    return issues

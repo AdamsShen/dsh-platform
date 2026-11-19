@@ -10,15 +10,13 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import logging
 import socket
-import sys
 from typing import Any, TypedDict
 
 from psycopg.types.json import Jsonb
 
-from ao import contracts, events, resources, usage
+from ao import contracts, events, memory, resources, usage
 from ao import state as state_machine
 from ao.db import fetch_one, read, tx
 from ao.gateway import gateway_root
@@ -28,7 +26,15 @@ from ao.input_guard import InputGuardError, sanitize_inputs
 from ao.manifest import Binding, Manifest, Node, eval_when, parse
 from ao.package import Package, load_package
 from ao.settings import settings
-from wf_sdk.runtime import GraphSpec, RunEnv, reset_run_env, set_run_env
+from wf_sdk.runtime import (
+    NodeContext,
+    RunEnv,
+    current_run_env,
+    reset_context,
+    reset_run_env,
+    set_context,
+    set_run_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -576,24 +582,92 @@ class RunRuntime:
                 (self.run_id, ctx.node_id, ctx.attempt, int(row["next"]), native_id, HOST),
             )
 
-    async def repair(self, ctx: Any, spec: Any, errors: list[str]) -> dict[str, Any]:
-        self.repair_count += 1
-        with tx() as conn:
-            events.emit(
-                conn,
-                self.run_id,
-                "node.repair",
-                node_id=ctx.node_id,
-                payload={"errors": errors},
+    async def run_stage(self, ctx: Any, node: Node) -> dict[str, Any]:
+        """一个阶段 = 一个新 harness 会话 + 会话内多轮。
+
+        会话边界：`_turn` 里的 `native_id` 只在本阶段内递增（repair 续轮），
+        节点结束就丢弃；下一节点从 `node_started` 重新取值，跨阶段不复用。
+
+        多轮规则：首轮用节点 prompt；产物不合格就在**同一会话**里追加一轮反馈，
+        直到满足契约或达到 `stage_max_turns`（默认 3，含首轮）。
+        """
+        outputs = {name: kind.__name__ for name, kind in _outputs_of(node).items()}
+        # 跨阶段交接靠文件：开场把前序摘要、上游产物与已产出文件拼进首轮 prompt
+        block = memory.bootstrap_block(self.package.root, node.id, ctx.nodes)
+        prompt = f"{block}\n\n---\n\n{ctx.prompt()}" if block else ctx.prompt()
+        text = await self._turn(ctx, prompt=prompt, repair=False)
+        data, errors = contracts.validate(text, outputs)
+        max_turns = max(1, int(getattr(settings, "stage_max_turns", 3)))
+        turn = 1
+        while errors and turn < max_turns:
+            turn += 1
+            self.repair_count += 1
+            with tx() as conn:
+                events.emit(
+                    conn,
+                    self.run_id,
+                    "node.repair",
+                    node_id=ctx.node_id,
+                    payload={"errors": errors, "turn": turn, "max_turns": max_turns},
+                )
+            text = await self._turn(
+                ctx, prompt=contracts.repair_prompt(errors, outputs), repair=True
             )
-        outputs = {name: kind.__name__ for name, kind in spec.outputs.items()}
-        text = await self._turn(
-            ctx, prompt=contracts.repair_prompt(errors, outputs), repair=True
-        )
-        data, remaining = contracts.validate(text, outputs)
-        if remaining:
-            raise contracts_error(remaining)
+            data, errors = contracts.validate(text, outputs)
+        if errors:
+            raise contracts_error(errors)
         return data or {}
+
+    async def summarize_stage(self, ctx: Any, node: Node, data: dict[str, Any]) -> None:
+        """阶段收尾摘要：起一个独立 read_only 会话，把结论追加进 `memory.md`。
+
+        摘要失败不阻断 run：下游只是少一段记忆，不能让已经成功的节点判失败。
+        mock 模式跳过——mock 回复没有语义，写进去只会污染后续阶段的上下文。
+        """
+        if settings.mock or not getattr(settings, "stage_summary_enabled", True):
+            return
+        try:
+            reply: Reply = await self.provider.send(
+                run_id=self.run_id,
+                node_id=f"{node.id}#summary",
+                attempt=ctx.attempt,
+                system="你是阶段收尾的记录员，只输出摘要正文。",
+                prompt=memory.summary_prompt(node.id, data),
+                contract=None,
+                repair=False,
+                native_id=None,
+                context={
+                    "capability": "read_only",
+                    "cwd": str(self.package.root),
+                    "timeout": 120.0,
+                },
+            )
+        except Exception:  # noqa: BLE001 — 摘要失败不影响主链路
+            logger.warning("阶段摘要失败: run=%s node=%s", self.run_id, node.id, exc_info=True)
+            return
+        if reply.status != "ok" or not (reply.text or "").strip():
+            logger.warning(
+                "阶段摘要未产出: run=%s node=%s status=%s", self.run_id, node.id, reply.status
+            )
+            return
+        memory.append_stage_summary(self.package.root, node.id, reply.text)
+        if reply.usage:
+            with tx() as conn:
+                cost = usage.record(
+                    conn,
+                    run_id=self.run_id,
+                    node_id=node.id,
+                    attempt=ctx.attempt,
+                    usage=reply.usage,
+                    purpose="summary",
+                    user_id=self.user_id,
+                )
+                conn.execute(
+                    "UPDATE run_nodes SET cost = cost + %s"
+                    " WHERE run_id = %s AND node_id = %s AND attempt = %s",
+                    (cost, self.run_id, node.id, ctx.attempt),
+                )
+                usage.refresh_run_spend(conn, self.run_id)
 
 
 def contracts_error(errors: list[str]) -> Exception:
@@ -641,66 +715,95 @@ def classify(exc: BaseException) -> str:
 # --- 图构建 -------------------------------------------------------------------
 
 
-def build_state_graph(spec: GraphSpec) -> Any:
+def build_state_graph(manifest: Manifest, runners: dict[str, Any]) -> Any:
+    """从 manifest 声明直接构图。
+
+    运行期不再加载任何生成代码：节点就是 `runners[id]`，边来自 manifest，
+    入口取"没有入边的节点"（多个即天然并行）。
+    """
     from langgraph.graph import END, START, StateGraph
 
     builder = StateGraph(GraphState)
-    for node_spec, fn in spec.nodes:
-        builder.add_node(node_spec.id, fn)
+    for node in manifest.nodes:
+        builder.add_node(node.id, runners[node.id])
 
-    outgoing: dict[str, list[dict[str, str]]] = {}
-    for edge in spec.edges:
-        outgoing.setdefault(edge["from"], []).append(edge)
+    outgoing: dict[str, list[tuple[str, str | None]]] = {}
+    for edge in manifest.edges:
+        outgoing.setdefault(edge.src, []).append((edge.dst, edge.when))
 
-    for node_spec, _ in spec.nodes:
-        edges = outgoing.get(node_spec.id, [])
+    for node in manifest.nodes:
+        edges = outgoing.get(node.id, [])
         if not edges:
-            builder.add_edge(node_spec.id, END)
+            builder.add_edge(node.id, END)
             continue
-        if any(edge.get("when") for edge in edges):
-            def router(state: dict[str, Any], _edges: list[dict[str, str]] = edges) -> list[str]:
+        if any(when for _, when in edges):
+
+            def router(
+                state: dict[str, Any], _edges: list[tuple[str, str | None]] = edges
+            ) -> list[str]:
                 nodes = state.get("nodes") or {}
                 targets = [
-                    edge["to"]
-                    for edge in _edges
-                    if not edge.get("when") or eval_when(edge["when"], nodes)
+                    dst for dst, when in _edges if not when or eval_when(when, nodes)
                 ]
                 return targets or [END]
 
-            builder.add_conditional_edges(node_spec.id, router)
+            builder.add_conditional_edges(node.id, router)
         else:
-            for edge in edges:
-                builder.add_edge(node_spec.id, edge["to"])
+            for dst, _ in edges:
+                builder.add_edge(node.id, dst)
 
-    incoming = {edge["to"] for edge in spec.edges}
-    entries = spec.entry or [n.id for n, _ in spec.nodes if n.id not in incoming]
-    for entry in entries:
-        builder.add_edge(START, entry)
+    incoming = {edge.dst for edge in manifest.edges}
+    for node in manifest.nodes:
+        if node.id not in incoming:
+            builder.add_edge(START, node.id)
     return builder
 
 
-def _check_spec(spec: GraphSpec, manifest: Manifest) -> None:
-    ids = set(spec.node_ids())
-    expected = {node.id for node in manifest.nodes}
-    if ids != expected:
-        raise ValueError(
-            f"graph.py 节点集合与 manifest 不一致: 代码 {sorted(ids)}，manifest {sorted(expected)}"
+def stage_runner(node: Node) -> Any:
+    """一个阶段的执行体：组装上下文 → 交给 runtime 跑本阶段的多轮 → 推进图状态。
+
+    这里没有任何生成代码。节点的"做什么"来自 prompts 文件与 manifest 声明，
+    "怎么做"由 harness 会话完成，平台只负责边界（会话新建、产物校验、落库）。
+    """
+
+    async def runner(state: dict[str, Any]) -> dict[str, Any]:
+        env = current_run_env()
+        ctx = NodeContext(
+            run_id=str(state.get("run_id") or ""),
+            node_id=node.id,
+            attempt=env.attempt,
+            vars=dict(state.get("vars") or {}),
+            nodes=dict(state.get("nodes") or {}),
+            subject=dict(state.get("subject") or {}),
+            package_root=env.package_root,
+            workspace=env.workspace,
+            artifacts=env.artifacts,
+            inputs=env.inputs,
+            mcp=list(env.mcp),
+            skills=list(env.skills),
+            runtime=env.runtime,
         )
-    edges = set(spec.edge_pairs())
-    expected_edges = {(edge.src, edge.dst) for edge in manifest.edges}
-    if edges != expected_edges:
-        raise ValueError("graph.py 边集合与 manifest 不一致")
+        token = set_context(ctx)
+        try:
+            if ctx.runtime is not None:
+                ctx.runtime.node_started(ctx, node)
+            data = await ctx.runtime.run_stage(ctx, node) if ctx.runtime else {}
+            if ctx.runtime is not None:
+                ctx.runtime.node_finished(ctx, node, data)
+                # 阶段边界落摘要：下一个节点是新会话，只能从这里读到本阶段的结论
+                await ctx.runtime.summarize_stage(ctx, node, data)
+            nodes = dict(ctx.nodes)
+            nodes[node.id] = data
+            return {"nodes": nodes, "last": node.id}
+        except Exception as exc:
+            if ctx.runtime is not None:
+                ctx.runtime.node_failed(ctx, node, exc)
+            raise
+        finally:
+            reset_context(token)
 
-
-def _load_graph_module(package: Package, run_id: str) -> Any:
-    name = f"ao_pkg_{run_id}"
-    module_spec = importlib.util.spec_from_file_location(name, package.graph_path)
-    if module_spec is None or module_spec.loader is None:
-        raise ValueError(f"无法加载 {package.graph_path}")
-    module = importlib.util.module_from_spec(module_spec)
-    sys.modules[name] = module
-    module_spec.loader.exec_module(module)
-    return module
+    runner.__name__ = f"stage_{node.id}"
+    return runner
 
 
 def _finish(run_id: str, epoch: int, status: str, error: str | None = None) -> None:
@@ -735,12 +838,6 @@ async def execute(run_id: str) -> str:
         provider = current_provider()
         runtime = RunRuntime(run=run, manifest=manifest, package=package, provider=provider)
 
-        module = _load_graph_module(package, run_id)
-        spec = getattr(module, "G", None)
-        if not isinstance(spec, GraphSpec):
-            raise ValueError("graph.py 必须定义模块级变量 G = graph(nodes=[...], edges=[...])")
-        _check_spec(spec, manifest)
-
         workspace = package.root / "workspace"
         artifacts = package.root / "artifacts"
         workspace.mkdir(exist_ok=True)
@@ -769,7 +866,9 @@ async def execute(run_id: str) -> str:
                 "nodes": {},
                 "subject": run.get("subject") or {},
             }
-            compiled = build_state_graph(spec)
+            compiled = build_state_graph(
+                manifest, {node.id: stage_runner(node) for node in manifest.nodes}
+            )
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
             async with AsyncPostgresSaver.from_conn_string(settings.db_url) as saver:

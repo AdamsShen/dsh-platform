@@ -38,6 +38,7 @@ def test_tamper_is_detected(tmp_path: Path) -> None:
 
 def test_missing_required_file(tmp_path: Path) -> None:
     root = make_package(tmp_path)
-    (root / "graph.py").unlink()
-    with pytest.raises(PackageError, match="缺少 graph.py"):
+    # graph.py 已不是必需文件；缺 manifest.json 才是硬错误
+    (root / "manifest.json").unlink()
+    with pytest.raises(PackageError, match="缺少 manifest.json"):
         compute_hashes(root)

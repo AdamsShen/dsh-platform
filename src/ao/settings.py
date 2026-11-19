@@ -135,6 +135,10 @@ class Settings:
         "用 bash 执行 `echo __dsh_probe__`，然后只回答 ok。不要做其它事。"
     )
     dsh_sandbox_unavailable_hints: str = ""
+    # 单个阶段内允许的 harness 轮数（含首轮）：产物不合格在同一会话里续轮修复
+    stage_max_turns: int = 3
+    # 阶段收尾是否用 LLM 提炼摘要写 memory.md（跨阶段记忆的唯一通道）
+    stage_summary_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -193,6 +197,8 @@ class Settings:
                 "AO_DSH_SANDBOX_PROBE_PROMPT", cls.dsh_sandbox_probe_prompt
             ),
             dsh_sandbox_unavailable_hints=os.environ.get("AO_DSH_SANDBOX_UNAVAILABLE_HINTS", ""),
+            stage_max_turns=_int("AO_STAGE_MAX_TURNS", 3),
+            stage_summary_enabled=_flag("AO_STAGE_SUMMARY", True),
         )
 
 
